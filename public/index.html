@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>面对面快传</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="hero card">
+        <div>
+          <p class="eyebrow">LAN WebRTC Transfer</p>
+          <h1>面对面快传</h1>
+          <p class="subtitle">同一局域网内跨设备直连传文件，文件不经过服务器。</p>
+        </div>
+        <div class="connection-pill" id="connectionState">初始化中</div>
+      </section>
+
+      <section class="card room-card">
+        <div class="section-title">
+          <div>
+            <h2>1. 建立连接</h2>
+            <p>让另一台设备打开下面链接，或输入房间码。</p>
+          </div>
+        </div>
+
+        <div class="room-grid">
+          <div class="room-code-box">
+            <span>房间码</span>
+            <strong id="roomCode">----</strong>
+          </div>
+          <div class="share-box">
+            <label for="shareLink">分享链接</label>
+            <div class="input-row">
+              <input id="shareLink" readonly value="生成中..." />
+              <button id="copyLinkBtn" type="button">复制</button>
+            </div>
+          </div>
+        </div>
+
+        <form class="join-row" id="joinForm">
+          <input id="joinRoomInput" placeholder="输入对方给你的房间码" autocomplete="off" />
+          <button type="submit">加入房间</button>
+        </form>
+
+        <div class="tips">
+          <span>提示：本地开发时，请用启动日志里的局域网 IP 链接访问。</span>
+        </div>
+      </section>
+
+      <section class="card peer-card">
+        <div class="section-title">
+          <div>
+            <h2>2. 连接状态</h2>
+            <p id="peerHint">等待另一台设备加入。</p>
+          </div>
+          <button id="resetRoomBtn" type="button" class="ghost-btn">新建房间</button>
+        </div>
+        <div class="status-grid">
+          <div>
+            <span>信令</span>
+            <strong id="signalStatus">未连接</strong>
+          </div>
+          <div>
+            <span>对端</span>
+            <strong id="peerStatus">未发现</strong>
+          </div>
+          <div>
+            <span>直连通道</span>
+            <strong id="channelStatus">未建立</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="card transfer-card">
+        <div class="section-title">
+          <div>
+            <h2>3. 选择文件发送</h2>
+            <p>支持多文件选择和拖拽。大文件会自动分片传输。</p>
+          </div>
+        </div>
+
+        <label class="drop-zone" id="dropZone" for="fileInput">
+          <input id="fileInput" type="file" multiple />
+          <span class="drop-icon">+</span>
+          <strong>点击选择文件或拖到这里</strong>
+          <small>连接成功后即可发送</small>
+        </label>
+
+        <div class="queue-block">
+          <h3>发送进度</h3>
+          <div id="sendList" class="empty-list">暂无发送任务</div>
+        </div>
+
+        <div class="queue-block">
+          <div class="queue-header">
+            <h3>收到的文件</h3>
+            <div class="batch-actions">
+              <label class="select-all-label">
+                <input id="selectAllFiles" type="checkbox" />
+                全选
+              </label>
+              <button id="downloadSelectedBtn" type="button" class="ghost-btn" disabled>直接下载</button>
+              <button id="downloadZipBtn" type="button" disabled>下载 ZIP</button>
+            </div>
+          </div>
+          <div id="receiveList" class="empty-list">暂无接收文件</div>
+        </div>
+      </section>
+
+      <section class="card log-card">
+        <div class="section-title compact">
+          <h2>日志</h2>
+          <button id="clearLogBtn" type="button" class="ghost-btn">清空</button>
+        </div>
+        <div id="logList" class="log-list"></div>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
