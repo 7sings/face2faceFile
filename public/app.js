@@ -19,6 +19,7 @@ const elements = {
   receiveList: document.querySelector('#receiveList'),
   selectAllFiles: document.querySelector('#selectAllFiles'),
   downloadSelectedBtn: document.querySelector('#downloadSelectedBtn'),
+  saveImagesBtn: document.querySelector('#saveImagesBtn'),
   downloadZipBtn: document.querySelector('#downloadZipBtn'),
   clearLogBtn: document.querySelector('#clearLogBtn'),
   logList: document.querySelector('#logList'),
@@ -95,6 +96,7 @@ function bindEvents() {
   });
 
   elements.downloadSelectedBtn.addEventListener('click', downloadSelectedFilesDirectly);
+  elements.saveImagesBtn.addEventListener('click', saveSelectedImagesToAlbum);
   elements.downloadZipBtn.addEventListener('click', downloadSelectedFilesAsZip);
 
   elements.clearLogBtn.addEventListener('click', () => {
@@ -443,6 +445,15 @@ function finishReceive(fileId) {
   task.element.append(action);
 
   state.receiveTasks.delete(fileId);
+  if (isImageFile(state.completedFiles.get(fileId))) {
+    const saveAction = document.createElement('button');
+    saveAction.type = 'button';
+    saveAction.className = 'album-link';
+    saveAction.textContent = '保存到相册';
+    saveAction.addEventListener('click', () => saveImagesToAlbum([state.completedFiles.get(fileId)]));
+    task.element.append(saveAction);
+  }
+
   updateBatchActions();
   log(`已接收：${safeName}`);
 }
@@ -537,6 +548,7 @@ function updateBatchActions() {
   elements.selectAllFiles.checked = total > 0 && selected === total;
   elements.selectAllFiles.indeterminate = selected > 0 && selected < total;
   elements.downloadSelectedBtn.disabled = selected === 0;
+  elements.saveImagesBtn.disabled = selected === 0;
   elements.downloadZipBtn.disabled = selected === 0;
 }
 
@@ -554,6 +566,81 @@ function downloadSelectedFilesDirectly() {
     setTimeout(() => triggerDownload(file.url, file.name), index * 250);
   });
   log(`开始直接下载：${files.length} 个文件`);
+}
+
+function saveSelectedImagesToAlbum() {
+  const files = getSelectedCompletedFiles();
+  if (!files.length) return;
+
+  const nonImages = files.filter((file) => !isImageFile(file));
+  if (nonImages.length) {
+    log(`保存到相册只支持图片，请取消勾选：${nonImages.map((file) => file.name).join('、')}`);
+    return;
+  }
+
+  saveImagesToAlbum(files);
+}
+
+async function saveImagesToAlbum(files) {
+  const images = files.filter(isImageFile);
+  if (!images.length) {
+    log('保存到相册只支持图片文件');
+    return;
+  }
+
+  const shareFiles = images.map((file) => new File([file.blob], file.name, { type: file.mime }));
+
+  if (navigator.canShare?.({ files: shareFiles }) && navigator.share) {
+    try {
+      await navigator.share({ files: shareFiles, title: '保存图片' });
+      log(`已调起系统面板：${images.length} 张图片`);
+      return;
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        log('已取消保存图片');
+        return;
+      }
+      log(`调起系统面板失败：${error.message}`);
+    }
+  }
+
+  if (images.length === 1) {
+    openImagePreview(images[0]);
+    log('当前浏览器不支持直接保存到相册，请在新页面长按图片保存');
+    return;
+  }
+
+  log('当前浏览器不支持批量保存到相册，请单张点击“保存到相册”或使用直接下载');
+}
+
+function openImagePreview(file) {
+  const preview = window.open('', '_blank');
+  if (!preview) {
+    window.open(file.url, '_blank');
+    return;
+  }
+
+  preview.document.write(`<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(file.name)}</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0f172a; color: white; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+    main { width: min(100% - 24px, 900px); text-align: center; }
+    img { max-width: 100%; max-height: 82vh; border-radius: 16px; background: white; }
+    p { color: #cbd5e1; }
+  </style>
+</head>
+<body>
+  <main>
+    <img src="${file.url}" alt="${escapeHtml(file.name)}" />
+    <p>如果没有出现系统保存面板，请长按图片选择“保存到照片”。</p>
+  </main>
+</body>
+</html>`);
+  preview.document.close();
 }
 
 async function downloadSelectedFilesAsZip() {
@@ -798,6 +885,19 @@ function formatBytes(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+function isImageFile(file) {
+  return Boolean(file?.mime?.startsWith('image/'));
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"]/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+  })[char]);
 }
 
 function getFileBadge(mime) {

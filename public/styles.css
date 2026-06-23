@@ -406,13 +406,18 @@ h3 {
   transition: width 0.12s linear;
 }
 
-.download-link {
+.download-link,
+.album-link {
   align-self: center;
   border-radius: 12px;
   padding: 9px 14px;
   color: white;
   background: var(--green);
   text-decoration: none;
+}
+
+.album-link {
+  background: var(--primary);
 }
 
 .log-list {
