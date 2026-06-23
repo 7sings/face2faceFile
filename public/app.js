@@ -207,6 +207,7 @@ async function handleSignal(message) {
   }
 
   if (message.type === 'offer') {
+    resetStalePeerConnection();
     const pc = ensurePeerConnection(false);
     await pc.setRemoteDescription(message.description);
     const answer = await pc.createAnswer();
@@ -234,6 +235,7 @@ async function handleSignal(message) {
 }
 
 async function startAsOfferer() {
+  resetStalePeerConnection();
   const pc = ensurePeerConnection(true);
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -244,7 +246,11 @@ async function startAsOfferer() {
 function ensurePeerConnection(isOfferer) {
   if (state.connection) return state.connection;
 
-  const pc = new RTCPeerConnection({ iceServers: [] });
+  const pc = new RTCPeerConnection({
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+    ],
+  });
   state.connection = pc;
 
   pc.addEventListener('icecandidate', (event) => {
@@ -748,7 +754,17 @@ function clearSignalHeartbeat() {
 }
 
 function hasActivePeerConnection() {
-  return ['connected', 'connecting'].includes(state.connection?.connectionState) || isChannelReady();
+  return state.connection?.connectionState === 'connected' || isChannelReady();
+}
+
+function resetStalePeerConnection() {
+  if (!state.connection || hasActivePeerConnection()) return;
+
+  state.channel?.close();
+  state.connection.close();
+  state.channel = null;
+  state.connection = null;
+  updateChannelStatus('重新建链中');
 }
 
 function waitForBuffer() {
