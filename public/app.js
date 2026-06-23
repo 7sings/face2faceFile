@@ -31,6 +31,8 @@ const state = {
   remotePeerId: '',
   connection: null,
   channel: null,
+  signalHeartbeat: null,
+  signalReconnectTimer: null,
   receiveTasks: new Map(),
   sendTasks: new Map(),
   completedFiles: new Map(),
@@ -100,10 +102,19 @@ function bindEvents() {
   });
 }
 
-function connectSignal() {
-  closePeerConnection();
+function connectSignal({ preservePeer = false } = {}) {
+  if (state.socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(state.socket.readyState)) return;
+
+  if (!preservePeer) {
+    closePeerConnection();
+  }
+
+  clearSignalHeartbeat();
+  clearTimeout(state.signalReconnectTimer);
   updateSignalStatus('连接中');
-  updateConnectionPill('连接信令中', 'pending');
+  if (!isChannelReady()) {
+    updateConnectionPill('连接信令中', 'pending');
+  }
 
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const url = `${protocol}//${window.location.host}/signal?room=${encodeURIComponent(state.roomId)}&peer=${encodeURIComponent(state.peerId)}`;
@@ -111,7 +122,10 @@ function connectSignal() {
 
   state.socket.addEventListener('open', () => {
     updateSignalStatus('已连接');
-    updateConnectionPill('等待对端', 'pending');
+    if (!isChannelReady()) {
+      updateConnectionPill('等待对端', 'pending');
+    }
+    startSignalHeartbeat();
     log('信令服务已连接');
   });
 
@@ -122,24 +136,40 @@ function connectSignal() {
   });
 
   state.socket.addEventListener('close', () => {
-    updateSignalStatus('已断开');
-    updatePeerStatus('未发现');
-    updateChannelStatus('未建立');
-    updateConnectionPill('信令断开', 'error');
-    log('信令连接已断开，可刷新页面重连');
+    clearSignalHeartbeat();
+    updateSignalStatus('重连中');
+
+    if (isChannelReady()) {
+      elements.peerHint.textContent = '文件通道仍可用，正在后台重连信令服务。';
+      log('信令连接已断开，正在后台重连；已建立的文件通道不受影响');
+    } else {
+      updatePeerStatus('未发现');
+      updateChannelStatus('未建立');
+      updateConnectionPill('信令重连中', 'pending');
+      log('信令连接已断开，正在重连');
+    }
+
+    state.signalReconnectTimer = setTimeout(() => connectSignal({ preservePeer: true }), 1500);
   });
 
   state.socket.addEventListener('error', () => {
-    updateSignalStatus('连接失败');
-    updateConnectionPill('信令异常', 'error');
-    log('信令连接失败，请确认服务已启动');
+    updateSignalStatus('连接异常');
+    if (!isChannelReady()) {
+      updateConnectionPill('信令异常', 'error');
+    }
   });
 }
 
 async function handleSignal(message) {
+  if (message.type === 'pong') return;
+
   if (message.type === 'welcome') {
     if (message.peers.length) {
       state.remotePeerId = message.peers[0];
+      if (hasActivePeerConnection()) {
+        updatePeerStatus('已直连');
+        return;
+      }
       updatePeerStatus('已发现');
       elements.peerHint.textContent = '发现对端，正在建立直连通道。';
       await startAsOfferer();
@@ -149,6 +179,8 @@ async function handleSignal(message) {
 
   if (message.type === 'peer-joined') {
     state.remotePeerId = message.peerId;
+    if (hasActivePeerConnection()) return;
+
     updatePeerStatus('已发现');
     elements.peerHint.textContent = '对端已加入，等待对端发起直连。';
     log('对端已加入房间');
@@ -613,6 +645,23 @@ async function createZipBlob(files) {
   ];
 
   return new Blob([...chunks, ...centralDirectory, ...endOfCentralDirectory], { type: 'application/zip' });
+}
+
+function startSignalHeartbeat() {
+  clearSignalHeartbeat();
+  state.signalHeartbeat = setInterval(() => {
+    sendSignal({ type: 'ping', now: Date.now() });
+  }, 15000);
+}
+
+function clearSignalHeartbeat() {
+  if (!state.signalHeartbeat) return;
+  clearInterval(state.signalHeartbeat);
+  state.signalHeartbeat = null;
+}
+
+function hasActivePeerConnection() {
+  return ['connected', 'connecting'].includes(state.connection?.connectionState) || isChannelReady();
 }
 
 function waitForBuffer() {

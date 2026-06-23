@@ -104,6 +104,11 @@ wss.on('connection', (ws, _req, { roomId, peerId }) => {
     const message = parseSignal(raw);
     if (!message) return;
 
+    if (message.type === 'ping') {
+      send(ws, { type: 'pong', now: Date.now() });
+      return;
+    }
+
     const allowedTypes = new Set(['ready', 'offer', 'answer', 'candidate']);
     if (!allowedTypes.has(message.type)) return;
 
