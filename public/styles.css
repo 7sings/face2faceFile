@@ -238,6 +238,38 @@ h3 {
   font-size: 20px;
 }
 
+.transfer-status-panel {
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px dashed rgba(37, 99, 235, 0.28);
+  border-radius: 20px;
+  background: rgba(239, 246, 255, 0.64);
+}
+
+.status-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.status-header h3 {
+  margin-bottom: 6px;
+}
+
+.status-actions {
+  display: flex;
+  flex: none;
+  gap: 8px;
+}
+
+.status-actions button {
+  padding: 9px 12px;
+  border-radius: 12px;
+  font-size: 13px;
+}
+
 .drop-zone {
   display: flex;
   min-height: 190px;
@@ -411,6 +443,8 @@ h3 {
   display: block;
   margin-top: 4px;
   font-size: 13px;
+  line-height: 1.4;
+  word-break: break-word;
 }
 
 .progress-track {
@@ -480,6 +514,7 @@ h3 {
 
   .hero,
   .section-title,
+  .status-header,
   .queue-header,
   .input-row,
   .join-row {
@@ -487,6 +522,8 @@ h3 {
   }
 
   .connection-pill,
+  .status-actions,
+  .status-actions button,
   .receive-tools,
   .receive-mode,
   .receive-mode button,
@@ -498,6 +535,7 @@ h3 {
     text-align: center;
   }
 
+  .status-actions,
   .receive-tools,
   .receive-mode,
   .batch-actions {

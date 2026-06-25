@@ -10,6 +10,7 @@ const elements = {
   joinForm: document.querySelector('#joinForm'),
   joinRoomInput: document.querySelector('#joinRoomInput'),
   resetRoomBtn: document.querySelector('#resetRoomBtn'),
+  reconnectBtn: document.querySelector('#reconnectBtn'),
   signalStatus: document.querySelector('#signalStatus'),
   peerStatus: document.querySelector('#peerStatus'),
   channelStatus: document.querySelector('#channelStatus'),
@@ -46,6 +47,8 @@ const state = {
   pendingChunkHeaders: [],
   dataMessageChain: Promise.resolve(),
   receiveDirectoryHandle: null,
+  manualReconnectInProgress: false,
+  suppressSocketCloseReconnect: false,
   isSending: false,
 };
 
@@ -62,6 +65,7 @@ function init() {
 
 function bindEvents() {
   elements.copyLinkBtn.addEventListener('click', copyShareLink);
+  elements.reconnectBtn.addEventListener('click', reconnectSession);
   elements.resetRoomBtn.addEventListener('click', () => {
     window.location.href = `${window.location.pathname}?room=${createRoomCode()}`;
   });
@@ -130,9 +134,12 @@ function connectSignal({ preservePeer = false } = {}) {
 
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const url = `${protocol}//${window.location.host}/signal?room=${encodeURIComponent(state.roomId)}&peer=${encodeURIComponent(state.peerId)}`;
-  state.socket = new WebSocket(url);
+  const socket = new WebSocket(url);
+  state.socket = socket;
 
-  state.socket.addEventListener('open', () => {
+  socket.addEventListener('open', () => {
+    state.manualReconnectInProgress = false;
+    updateReconnectAvailability(false);
     updateSignalStatus('已连接');
     if (!isChannelReady()) {
       updateConnectionPill('等待对端', 'pending');
@@ -141,33 +148,47 @@ function connectSignal({ preservePeer = false } = {}) {
     log('信令服务已连接');
   });
 
-  state.socket.addEventListener('message', async (event) => {
+  socket.addEventListener('message', async (event) => {
     const message = parseJson(event.data);
     if (!message) return;
     await handleSignal(message);
   });
 
-  state.socket.addEventListener('close', () => {
+  socket.addEventListener('close', () => {
     clearSignalHeartbeat();
+    if (state.suppressSocketCloseReconnect && state.socket !== socket) {
+      state.suppressSocketCloseReconnect = false;
+      return;
+    }
+
+    if (state.socket === socket) {
+      state.socket = null;
+    }
+    state.manualReconnectInProgress = false;
     updateSignalStatus('重连中');
 
     if (isChannelReady()) {
       elements.peerHint.textContent = '文件通道仍可用，正在后台重连信令服务。';
+      updateReconnectAvailability(false);
       log('信令连接已断开，正在后台重连；已建立的文件通道不受影响');
     } else {
       updatePeerStatus('未发现');
       updateChannelStatus('未建立');
       updateConnectionPill('信令重连中', 'pending');
+      updateReconnectAvailability(true);
       log('信令连接已断开，正在重连');
     }
 
     state.signalReconnectTimer = setTimeout(() => connectSignal({ preservePeer: true }), 1500);
   });
 
-  state.socket.addEventListener('error', () => {
+  socket.addEventListener('error', () => {
+    state.manualReconnectInProgress = false;
     updateSignalStatus('连接异常');
     if (!isChannelReady()) {
       updateConnectionPill('信令异常', 'error');
+      elements.peerHint.textContent = '信令连接异常，可尝试局部重连。';
+      updateReconnectAvailability(true);
     }
   });
 }
@@ -281,11 +302,22 @@ function ensurePeerConnection(isOfferer) {
     updatePeerStatus(statusMap[pc.connectionState] || pc.connectionState);
     if (pc.connectionState === 'connected') {
       updateConnectionPill('已直连', 'ok');
+      updateReconnectAvailability(false);
       elements.peerHint.textContent = '直连成功，可以开始发送文件。';
+    }
+    if (pc.connectionState === 'disconnected') {
+      updateConnectionPill('连接不稳定', 'error');
+      updateReconnectAvailability(true);
+      elements.peerHint.textContent = '与对端连接中断，可点击“局部重连”恢复。';
     }
     if (pc.connectionState === 'failed') {
       updateConnectionPill('直连失败', 'error');
+      updateReconnectAvailability(true);
+      elements.peerHint.textContent = '直连失败，可点击“局部重连”重建连接。';
       log('直连失败：请确认两台设备在同一局域网，且浏览器支持 WebRTC');
+    }
+    if (pc.connectionState === 'closed') {
+      updateReconnectAvailability(true);
     }
   });
 
@@ -309,6 +341,8 @@ function setupDataChannel(channel) {
   channel.addEventListener('open', () => {
     updateChannelStatus('已就绪');
     updateConnectionPill('可以传文件', 'ok');
+    updateReconnectAvailability(false);
+    elements.peerHint.textContent = '直连成功，可以开始发送文件。';
     elements.dropZone.classList.add('enabled');
     log('文件传输通道已建立');
     processSendQueue();
@@ -317,12 +351,18 @@ function setupDataChannel(channel) {
   channel.addEventListener('close', () => {
     cleanupTransferRuntime();
     updateChannelStatus('已关闭');
+    updateConnectionPill('连接中断', 'error');
+    updateReconnectAvailability(true);
+    elements.peerHint.textContent = '文件传输通道已关闭，可点击“局部重连”恢复。';
     elements.dropZone.classList.remove('enabled');
     log('文件传输通道已关闭');
   });
 
   channel.addEventListener('error', () => {
     updateChannelStatus('异常');
+    updateConnectionPill('通道异常', 'error');
+    updateReconnectAvailability(true);
+    elements.peerHint.textContent = '文件传输通道异常，可尝试局部重连。';
     log('文件传输通道异常');
   });
 
@@ -368,6 +408,7 @@ function createSendTask(file) {
     offset: 0,
     seq: 0,
     element,
+    transferStats: createTransferStats(),
     metaSent: false,
     done: false,
   };
@@ -413,8 +454,9 @@ function fillActiveSendTasks() {
 function sendTaskMeta(task) {
   if (task.metaSent) return;
   task.metaSent = true;
+  task.transferStats = createTransferStats();
   sendData({ type: 'file-meta', id: task.id, name: task.name, size: task.size, mime: task.mime });
-  updateTransferItem(task.element, 0, `${formatBytes(task.size)} · 发送中`);
+  updateTransferItem(task.element, 0, buildTransferMeta(task, 0, task.size));
 }
 
 async function sendNextChunk(task) {
@@ -428,7 +470,8 @@ async function sendNextChunk(task) {
   sendData(chunk);
   task.offset += chunk.byteLength;
   task.seq += 1;
-  updateTransferItem(task.element, task.size ? task.offset / task.size : 1, `${formatBytes(task.offset)} / ${formatBytes(task.size)}`);
+  updateTransferStats(task, task.offset);
+  updateTransferItem(task.element, task.size ? task.offset / task.size : 1, buildTransferMeta(task, task.offset, task.size));
 }
 
 function finishSendTask(task) {
@@ -505,6 +548,7 @@ async function createReceiveTask(message) {
     writeChain: Promise.resolve(),
     received: 0,
     seqExpected: 0,
+    transferStats: createTransferStats(),
     element,
   };
 
@@ -572,7 +616,8 @@ async function handleFileChunk(fileId, chunk, header) {
   }
 
   task.received += buffer.byteLength;
-  updateTransferItem(task.element, task.size ? task.received / task.size : 0, `${formatBytes(task.received)} / ${formatBytes(task.size)}`);
+  updateTransferStats(task, task.received);
+  updateTransferItem(task.element, task.size ? task.received / task.size : 0, buildTransferMeta(task, task.received, task.size));
 }
 
 async function finishReceive(fileId) {
@@ -1014,6 +1059,40 @@ function closePeerConnection() {
   elements.dropZone.classList.remove('enabled');
 }
 
+function reconnectSession() {
+  if (state.manualReconnectInProgress) return;
+  state.manualReconnectInProgress = true;
+  updateReconnectAvailability(false, '重连中...');
+  updateSignalStatus('重连中');
+  updatePeerStatus('重连中');
+  updateChannelStatus('重建中');
+  updateConnectionPill('正在重连', 'pending');
+  elements.peerHint.textContent = '正在局部重连，已完成文件和日志会保留。';
+  log('开始局部重连');
+
+  teardownConnectionForReconnect();
+  connectSignal({ preservePeer: true });
+}
+
+function teardownConnectionForReconnect() {
+  clearSignalHeartbeat();
+  clearTimeout(state.signalReconnectTimer);
+
+  const socket = state.socket;
+  state.socket = null;
+  if (socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState)) {
+    state.suppressSocketCloseReconnect = true;
+    socket.close();
+  }
+
+  closePeerConnection();
+}
+
+function updateReconnectAvailability(enabled, label = '局部重连') {
+  elements.reconnectBtn.disabled = !enabled;
+  elements.reconnectBtn.textContent = label;
+}
+
 function cleanupTransferRuntime() {
   state.pendingChunkHeaders = [];
   state.dataMessageChain = Promise.resolve();
@@ -1167,6 +1246,59 @@ function formatBytes(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+function createTransferStats() {
+  return {
+    startedAt: Date.now(),
+    speedBps: 0,
+  };
+}
+
+function updateTransferStats(task, transferredBytes) {
+  const elapsedSeconds = (Date.now() - task.transferStats.startedAt) / 1000;
+  if (transferredBytes <= 0 || elapsedSeconds < 1) return;
+
+  const averageSpeed = transferredBytes / elapsedSeconds;
+  if (!Number.isFinite(averageSpeed) || averageSpeed <= 0) return;
+
+  task.transferStats.speedBps = task.transferStats.speedBps
+    ? task.transferStats.speedBps * 0.7 + averageSpeed * 0.3
+    : averageSpeed;
+}
+
+function buildTransferMeta(task, transferredBytes, totalBytes) {
+  const transferred = Math.max(0, Number(transferredBytes) || 0);
+  const total = Math.max(0, Number(totalBytes) || 0);
+  const sizeText = `${formatBytes(transferred)} / ${formatBytes(total)}`;
+  const speed = task.transferStats?.speedBps || 0;
+
+  if (!total || transferred <= 0 || !Number.isFinite(speed) || speed <= 0) {
+    return `${sizeText} · 估算中`;
+  }
+
+  const remainingSeconds = (total - transferred) / speed;
+  const etaText = formatDuration(remainingSeconds);
+  if (!etaText) {
+    return `${sizeText} · ${formatBytes(speed)}/s · 估算中`;
+  }
+
+  return `${sizeText} · ${formatBytes(speed)}/s · 剩余 ${etaText}`;
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '';
+
+  const safeSeconds = Math.max(1, Math.ceil(seconds));
+  if (safeSeconds < 60) return `${safeSeconds} 秒`;
+
+  const minutes = Math.floor(safeSeconds / 60);
+  const restSeconds = safeSeconds % 60;
+  if (minutes < 60) return `${minutes} 分 ${String(restSeconds).padStart(2, '0')} 秒`;
+
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  return `${hours} 小时 ${String(restMinutes).padStart(2, '0')} 分`;
 }
 
 function isImageFile(file) {
