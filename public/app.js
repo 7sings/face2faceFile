@@ -16,6 +16,7 @@ const elements = {
   signalStatus: document.querySelector('#signalStatus'),
   peerStatus: document.querySelector('#peerStatus'),
   channelStatus: document.querySelector('#channelStatus'),
+  connectionTypeStatus: document.querySelector('#connectionTypeStatus'),
   peerHint: document.querySelector('#peerHint'),
   dropZone: document.querySelector('#dropZone'),
   fileInput: document.querySelector('#fileInput'),
@@ -44,6 +45,7 @@ const state = {
   remotePeerId: '',
   connection: null,
   channel: null,
+  connectionType: '',
   signalHeartbeat: null,
   signalReconnectTimer: null,
   receiveTasks: new Map(),
@@ -372,29 +374,37 @@ function ensurePeerConnection(isOfferer, iceServers = DEFAULT_ICE_SERVERS) {
     const statusMap = {
       new: '准备中',
       connecting: '连接中',
-      connected: '已直连',
+      connected: '已连接',
       disconnected: '已断开',
       failed: '连接失败',
       closed: '已关闭',
     };
     updatePeerStatus(statusMap[pc.connectionState] || pc.connectionState);
     if (pc.connectionState === 'connected') {
-      updateConnectionPill('已直连', 'ok');
+      updateConnectionPill('已连接', 'ok');
+      updateConnectionTypeStatus('识别中');
       updateReconnectAvailability(false);
-      elements.peerHint.textContent = '直连成功，可以开始发送文件。';
+      elements.peerHint.textContent = '连接成功，正在识别连接方式。';
+      updateConnectionTypeFromStats(pc);
     }
     if (pc.connectionState === 'disconnected') {
+      state.connectionType = '';
+      updateConnectionTypeStatus('已断开');
       updateConnectionPill('连接不稳定', 'error');
       updateReconnectAvailability(true);
       elements.peerHint.textContent = '与对端连接中断，可点击“局部重连”恢复。';
     }
     if (pc.connectionState === 'failed') {
-      updateConnectionPill('直连失败', 'error');
+      state.connectionType = '';
+      updateConnectionTypeStatus('未建立');
+      updateConnectionPill('连接失败', 'error');
       updateReconnectAvailability(true);
-      elements.peerHint.textContent = '直连失败，可点击“局部重连”重建连接。';
-      log('直连失败：请确认两台设备在同一局域网，且浏览器支持 WebRTC');
+      elements.peerHint.textContent = '连接失败，可点击“局部重连”重建连接。';
+      log('连接失败：请确认两台设备在同一局域网，且浏览器支持 WebRTC');
     }
     if (pc.connectionState === 'closed') {
+      state.connectionType = '';
+      updateConnectionTypeStatus('未建立');
       updateReconnectAvailability(true);
     }
   });
@@ -419,16 +429,20 @@ function setupDataChannel(channel) {
   channel.addEventListener('open', () => {
     updateChannelStatus('已就绪');
     updateConnectionPill('可以传文件', 'ok');
+    updateConnectionTypeStatus('识别中');
     updateReconnectAvailability(false);
-    elements.peerHint.textContent = '直连成功，可以开始发送文件。';
+    elements.peerHint.textContent = '连接成功，正在识别连接方式。';
     elements.dropZone.classList.add('enabled');
+    updateConnectionTypeFromStats();
     log('文件传输通道已建立');
     processSendQueue();
   });
 
   channel.addEventListener('close', () => {
     cleanupTransferRuntime();
+    state.connectionType = '';
     updateChannelStatus('已关闭');
+    updateConnectionTypeStatus('未建立');
     updateConnectionPill('连接中断', 'error');
     updateReconnectAvailability(true);
     elements.peerHint.textContent = '文件传输通道已关闭，可点击“局部重连”恢复。';
@@ -665,6 +679,9 @@ async function setupWritableReceiveSink(task, directoryHandle, sinkType, statusT
   task.fileHandle = fileHandle;
   task.name = name;
   task.element.querySelector('strong').textContent = name;
+  if (sinkType === 'fs') {
+    hideTransferSelection(task.element);
+  }
   updateTransferItem(task.element, 0, `${formatBytes(task.size)} · ${statusText}`);
 }
 
@@ -887,8 +904,8 @@ function createTransferItem(container, file) {
     <div class="transfer-info">
       <strong></strong>
       <span></span>
+      <div class="progress-track"><div class="progress-bar"></div></div>
     </div>
-    <div class="progress-track"><div class="progress-bar"></div></div>
   `;
   item.querySelector('strong').textContent = file.name;
   item.querySelector('span').textContent = file.meta;
@@ -933,6 +950,11 @@ function enableTransferSelection(item, fileId) {
     }
     updateBatchActions();
   });
+}
+
+function hideTransferSelection(item) {
+  item.querySelector('.file-select')?.remove();
+  item.classList.remove('is-selectable');
 }
 
 function setAllReceivedSelection(checked) {
@@ -1177,7 +1199,9 @@ function resetStalePeerConnection() {
   state.connection.close();
   state.channel = null;
   state.connection = null;
+  state.connectionType = '';
   updateChannelStatus('重新建链中');
+  updateConnectionTypeStatus('重新建链中');
 }
 
 function waitForBuffer() {
@@ -1212,13 +1236,85 @@ function isChannelReady() {
   return state.channel?.readyState === 'open';
 }
 
+async function updateConnectionTypeFromStats(pc = state.connection, attempt = 0) {
+  if (!pc || !canUpdateConnectionType(pc)) return;
+
+  try {
+    const stats = await pc.getStats();
+    const pair = getSelectedCandidatePair(stats);
+    const localCandidate = pair?.localCandidateId ? stats.get(pair.localCandidateId) : null;
+    const remoteCandidate = pair?.remoteCandidateId ? stats.get(pair.remoteCandidateId) : null;
+
+    if (!localCandidate || !remoteCandidate) {
+      if (attempt < 6 && canUpdateConnectionType(pc)) {
+        setTimeout(() => updateConnectionTypeFromStats(pc, attempt + 1), 500);
+      }
+      return;
+    }
+
+    const connectionType = getConnectionTypeText(localCandidate, remoteCandidate);
+    if (!connectionType || !canUpdateConnectionType(pc)) return;
+
+    updateConnectionTypeStatus(connectionType);
+    elements.peerHint.textContent = `连接方式：${connectionType}，可以开始发送文件。`;
+    if (state.connectionType !== connectionType) {
+      state.connectionType = connectionType;
+      log(`P2P 连接方式：${connectionType}`);
+    }
+  } catch (error) {
+    if (canUpdateConnectionType(pc)) {
+      updateConnectionTypeStatus('识别失败');
+      log(`连接方式识别失败：${error.message}`);
+    }
+  }
+}
+
+function canUpdateConnectionType(pc) {
+  return pc === state.connection && !['closed', 'failed', 'disconnected'].includes(pc.connectionState);
+}
+
+function getSelectedCandidatePair(stats) {
+  let selectedPair = null;
+
+  stats.forEach((report) => {
+    if (report.type === 'transport' && report.selectedCandidatePairId) {
+      selectedPair = stats.get(report.selectedCandidatePairId) || selectedPair;
+    }
+  });
+  if (selectedPair) return selectedPair;
+
+  stats.forEach((report) => {
+    if (report.type === 'candidate-pair' && (report.selected || (report.nominated && report.state === 'succeeded'))) {
+      selectedPair = report;
+    }
+  });
+  if (selectedPair) return selectedPair;
+
+  stats.forEach((report) => {
+    if (!selectedPair && report.type === 'candidate-pair' && report.state === 'succeeded') {
+      selectedPair = report;
+    }
+  });
+  return selectedPair;
+}
+
+function getConnectionTypeText(localCandidate, remoteCandidate) {
+  const candidateTypes = [localCandidate?.candidateType, remoteCandidate?.candidateType].filter(Boolean);
+  if (candidateTypes.includes('relay')) return 'TURN 中转';
+  if (candidateTypes.includes('srflx') || candidateTypes.includes('prflx')) return 'STUN P2P 直连';
+  if (candidateTypes.includes('host')) return '局域网';
+  return '';
+}
+
 function closePeerConnection() {
   cleanupTransferRuntime();
   state.channel?.close();
   state.connection?.close();
   state.channel = null;
   state.connection = null;
+  state.connectionType = '';
   state.remotePeerId = '';
+  updateConnectionTypeStatus('未建立');
   elements.dropZone.classList.remove('enabled');
 }
 
@@ -1229,6 +1325,8 @@ function reconnectSession() {
   updateSignalStatus('重连中');
   updatePeerStatus('重连中');
   updateChannelStatus('重建中');
+  state.connectionType = '';
+  updateConnectionTypeStatus('重建中');
   updateConnectionPill('正在重连', 'pending');
   elements.peerHint.textContent = '正在局部重连，已完成文件和日志会保留。';
   log('开始局部重连');
@@ -1374,6 +1472,10 @@ function updatePeerStatus(text) {
 
 function updateChannelStatus(text) {
   elements.channelStatus.textContent = text;
+}
+
+function updateConnectionTypeStatus(text) {
+  elements.connectionTypeStatus.textContent = text;
 }
 
 function updateConnectionPill(text, type) {
