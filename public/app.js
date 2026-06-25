@@ -47,6 +47,7 @@ const state = {
   pendingChunkHeaders: [],
   dataMessageChain: Promise.resolve(),
   receiveDirectoryHandle: null,
+  receiveOpfsRootHandle: null,
   manualReconnectInProgress: false,
   suppressSocketCloseReconnect: false,
   isSending: false,
@@ -558,38 +559,66 @@ async function createReceiveTask(message) {
 }
 
 async function setupReceiveSink(task) {
-  if (!state.receiveDirectoryHandle || !isFileSystemReceiveSupported()) return;
+  if (state.receiveDirectoryHandle && isDirectoryReceiveSupported()) {
+    try {
+      await setupWritableReceiveSink(task, state.receiveDirectoryHandle, 'fs', '流式接收中');
+      return;
+    } catch (error) {
+      log(`流式保存到目录不可用，尝试浏览器本地暂存：${error.message}`);
+    }
+  }
 
-  try {
-    const { fileHandle, name } = await createAvailableReceiveFile(task.name);
-    const writer = await fileHandle.createWritable();
-    task.sinkType = 'fs';
-    task.chunks = null;
-    task.writer = writer;
-    task.fileHandle = fileHandle;
-    task.name = name;
-    task.element.querySelector('strong').textContent = name;
-    updateTransferItem(task.element, 0, `${formatBytes(task.size)} · 流式接收中`);
-  } catch (error) {
-    log(`流式保存不可用，改用标准接收：${error.message}`);
+  if (isOpfsReceiveSupported()) {
+    try {
+      const rootHandle = await getOpfsRootHandle();
+      await setupWritableReceiveSink(task, rootHandle, 'opfs', '浏览器本地暂存中');
+      return;
+    } catch (error) {
+      log(`浏览器本地暂存不可用，改用标准接收：${error.message}`);
+    }
   }
 }
 
-async function createAvailableReceiveFile(name) {
+async function setupWritableReceiveSink(task, directoryHandle, sinkType, statusText) {
+  const { fileHandle, name } = await createAvailableReceiveFile(directoryHandle, task.name);
+  const writer = await fileHandle.createWritable();
+  task.sinkType = sinkType;
+  task.chunks = null;
+  task.writer = writer;
+  task.fileHandle = fileHandle;
+  task.name = name;
+  task.element.querySelector('strong').textContent = name;
+  updateTransferItem(task.element, 0, `${formatBytes(task.size)} · ${statusText}`);
+}
+
+async function createAvailableReceiveFile(directoryHandle, name) {
   const safeName = sanitizeFileName(name || `received-${Date.now()}`);
 
   for (let index = 0; index < 1000; index += 1) {
     const candidate = index === 0 ? safeName : appendFileNameSuffix(safeName, index + 1);
     try {
-      await state.receiveDirectoryHandle.getFileHandle(candidate);
+      await directoryHandle.getFileHandle(candidate);
     } catch (error) {
       if (error.name !== 'NotFoundError') throw error;
-      const fileHandle = await state.receiveDirectoryHandle.getFileHandle(candidate, { create: true });
+      const fileHandle = await directoryHandle.getFileHandle(candidate, { create: true });
       return { fileHandle, name: candidate };
     }
   }
 
   throw new Error('目录内同名文件过多');
+}
+
+async function getOpfsRootHandle() {
+  if (!state.receiveOpfsRootHandle) {
+    state.receiveOpfsRootHandle = await navigator.storage.getDirectory();
+  }
+  return state.receiveOpfsRootHandle;
+}
+
+async function removeOpfsPartialFile(task) {
+  if (!task.name || !isOpfsReceiveSupported()) return;
+  const rootHandle = await getOpfsRootHandle();
+  await rootHandle.removeEntry(task.name);
 }
 
 async function handleFileChunk(fileId, chunk, header) {
@@ -608,7 +637,7 @@ async function handleFileChunk(fileId, chunk, header) {
   }
   task.seqExpected += 1;
 
-  if (task.sinkType === 'fs' && task.writer) {
+  if (task.writer) {
     task.writeChain = task.writeChain.then(() => task.writer.write(buffer));
     await task.writeChain;
   } else {
@@ -626,6 +655,11 @@ async function finishReceive(fileId) {
 
   if (task.sinkType === 'fs') {
     await finishFileSystemReceive(fileId, task);
+    return;
+  }
+
+  if (task.sinkType === 'opfs') {
+    await finishOpfsReceive(fileId, task);
     return;
   }
 
@@ -687,6 +721,58 @@ async function finishFileSystemReceive(fileId, task) {
     } catch {}
     updateTransferItem(task.element, task.size ? task.received / task.size : 0, `${formatBytes(task.received)} · 保存失败`);
     log(`保存失败：${task.name}，${error.message}`);
+  } finally {
+    state.receiveTasks.delete(fileId);
+    updateBatchActions();
+  }
+}
+
+async function finishOpfsReceive(fileId, task) {
+  try {
+    await task.writeChain;
+    await task.writer.close();
+    const fileFromOPFS = await task.fileHandle.getFile();
+    const url = URL.createObjectURL(fileFromOPFS);
+
+    state.completedFiles.set(fileId, {
+      id: fileId,
+      name: task.name,
+      mime: task.mime,
+      size: fileFromOPFS.size,
+      blob: fileFromOPFS,
+      url,
+      storage: 'opfs',
+      fileHandle: task.fileHandle,
+    });
+
+    updateTransferItem(task.element, 1, `${formatBytes(fileFromOPFS.size)} · 已接收`);
+    setTransferThumbnail(task.element, { mime: task.mime, thumbnailUrl: task.mime.startsWith('image/') ? url : '' });
+    enableTransferSelection(task.element, fileId);
+
+    const action = document.createElement('a');
+    action.href = url;
+    action.download = task.name;
+    action.className = 'download-link';
+    action.textContent = '下载';
+    task.element.append(action);
+
+    const completedFile = state.completedFiles.get(fileId);
+    if (isImageFile(completedFile)) {
+      const saveAction = document.createElement('button');
+      saveAction.type = 'button';
+      saveAction.className = 'album-link';
+      saveAction.textContent = '保存到相册';
+      saveAction.addEventListener('click', () => saveImagesToAlbum([completedFile]));
+      task.element.append(saveAction);
+    }
+
+    log(`已接收：${task.name}`);
+  } catch (error) {
+    try {
+      await task.writer?.abort();
+    } catch {}
+    updateTransferItem(task.element, task.size ? task.received / task.size : 0, `${formatBytes(task.received)} · 保存失败`);
+    log(`浏览器本地暂存失败：${task.name}，${error.message}`);
   } finally {
     state.receiveTasks.delete(fileId);
     updateBatchActions();
@@ -1104,8 +1190,11 @@ function cleanupTransferRuntime() {
   state.activeSendTasks = [];
 
   for (const task of state.receiveTasks.values()) {
-    if (task.sinkType === 'fs' && task.writer) {
+    if (task.writer) {
       task.writer.abort().catch(() => {});
+    }
+    if (task.sinkType === 'opfs') {
+      removeOpfsPartialFile(task).catch(() => {});
     }
     updateTransferItem(task.element, task.size ? task.received / task.size : 0, `${formatBytes(task.received)} · 接收中断`);
   }
@@ -1113,8 +1202,8 @@ function cleanupTransferRuntime() {
 }
 
 async function selectReceiveDirectory() {
-  if (!isFileSystemReceiveSupported()) {
-    log('当前浏览器不支持流式保存到目录，将继续使用标准接收');
+  if (!isDirectoryReceiveSupported()) {
+    log('当前浏览器不支持选择接收目录，将继续使用浏览器本地暂存或标准接收');
     updateReceiveModeStatus();
     return;
   }
@@ -1132,25 +1221,38 @@ async function selectReceiveDirectory() {
   }
 }
 
-function isFileSystemReceiveSupported() {
+function isDirectoryReceiveSupported() {
   return typeof window.showDirectoryPicker === 'function';
 }
 
+function isOpfsReceiveSupported() {
+  return typeof navigator.storage?.getDirectory === 'function';
+}
+
 function updateReceiveModeStatus() {
-  if (!isFileSystemReceiveSupported()) {
-    elements.receiveModeStatus.textContent = '标准接收：当前环境不支持流式目录保存';
-    elements.selectReceiveDirBtn.disabled = true;
+  if (state.receiveDirectoryHandle) {
+    elements.receiveModeStatus.textContent = '流式保存到目录：页面内不再缓存这些文件';
+    elements.selectReceiveDirBtn.disabled = false;
+    elements.selectReceiveDirBtn.textContent = '更换接收目录';
     return;
   }
 
-  elements.selectReceiveDirBtn.disabled = false;
-  if (state.receiveDirectoryHandle) {
-    elements.receiveModeStatus.textContent = '流式保存到目录：页面内不再缓存这些文件';
-    elements.selectReceiveDirBtn.textContent = '更换接收目录';
+  if (isDirectoryReceiveSupported()) {
+    elements.receiveModeStatus.textContent = isOpfsReceiveSupported()
+      ? '流式接收：使用浏览器本地存储暂存，完成后生成下载链接'
+      : '标准接收：完成后生成下载链接';
+    elements.selectReceiveDirBtn.disabled = false;
+    elements.selectReceiveDirBtn.textContent = '选择接收目录（可选）';
+    return;
+  }
+
+  elements.selectReceiveDirBtn.disabled = true;
+  if (isOpfsReceiveSupported()) {
+    elements.receiveModeStatus.textContent = '流式接收：使用浏览器本地存储暂存，完成后生成下载链接';
   } else {
     elements.receiveModeStatus.textContent = '标准接收：完成后生成下载链接';
-    elements.selectReceiveDirBtn.textContent = '选择接收目录（实验）';
   }
+  elements.selectReceiveDirBtn.textContent = '当前浏览器不支持选择目录';
 }
 
 async function copyShareLink() {
