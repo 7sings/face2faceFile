@@ -96,14 +96,20 @@
         <div class="queue-block">
           <div class="queue-header">
             <h3>收到的文件</h3>
-            <div class="batch-actions">
-              <label class="select-all-label">
-                <input id="selectAllFiles" type="checkbox" />
-                全选
-              </label>
-              <button id="downloadSelectedBtn" type="button" class="ghost-btn" disabled>直接下载</button>
-              <button id="saveImagesBtn" type="button" class="ghost-btn" disabled>保存图片</button>
-              <button id="downloadZipBtn" type="button" disabled>下载 ZIP</button>
+            <div class="receive-tools">
+              <div class="receive-mode">
+                <span id="receiveModeStatus">标准接收：完成后生成下载链接</span>
+                <button id="selectReceiveDirBtn" type="button" class="ghost-btn">选择接收目录（实验）</button>
+              </div>
+              <div class="batch-actions">
+                <label class="select-all-label">
+                  <input id="selectAllFiles" type="checkbox" />
+                  全选
+                </label>
+                <button id="downloadSelectedBtn" type="button" class="ghost-btn" disabled>直接下载</button>
+                <button id="saveImagesBtn" type="button" class="ghost-btn" disabled>保存图片</button>
+                <button id="downloadZipBtn" type="button" disabled>下载 ZIP</button>
+              </div>
             </div>
           </div>
           <div id="receiveList" class="empty-list">暂无接收文件</div>

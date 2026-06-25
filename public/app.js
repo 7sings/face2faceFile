@@ -1,5 +1,6 @@
 const CHUNK_SIZE = 64 * 1024;
 const BUFFER_HIGH_WATER = 8 * 1024 * 1024;
+const MAX_CONCURRENT_SENDS = 5;
 
 const elements = {
   connectionState: document.querySelector('#connectionState'),
@@ -17,6 +18,8 @@ const elements = {
   fileInput: document.querySelector('#fileInput'),
   sendList: document.querySelector('#sendList'),
   receiveList: document.querySelector('#receiveList'),
+  receiveModeStatus: document.querySelector('#receiveModeStatus'),
+  selectReceiveDirBtn: document.querySelector('#selectReceiveDirBtn'),
   selectAllFiles: document.querySelector('#selectAllFiles'),
   downloadSelectedBtn: document.querySelector('#downloadSelectedBtn'),
   saveImagesBtn: document.querySelector('#saveImagesBtn'),
@@ -39,6 +42,10 @@ const state = {
   completedFiles: new Map(),
   selectedFileIds: new Set(),
   sendQueue: [],
+  activeSendTasks: [],
+  pendingChunkHeaders: [],
+  dataMessageChain: Promise.resolve(),
+  receiveDirectoryHandle: null,
   isSending: false,
 };
 
@@ -49,6 +56,7 @@ function init() {
   renderRoomInfo();
   bindEvents();
   updateBatchActions();
+  updateReceiveModeStatus();
   connectSignal();
 }
 
@@ -90,6 +98,8 @@ function bindEvents() {
   elements.dropZone.addEventListener('drop', (event) => {
     sendFiles([...event.dataTransfer.files]);
   });
+
+  elements.selectReceiveDirBtn.addEventListener('click', selectReceiveDirectory);
 
   elements.selectAllFiles.addEventListener('change', () => {
     setAllReceivedSelection(elements.selectAllFiles.checked);
@@ -305,6 +315,7 @@ function setupDataChannel(channel) {
   });
 
   channel.addEventListener('close', () => {
+    cleanupTransferRuntime();
     updateChannelStatus('已关闭');
     elements.dropZone.classList.remove('enabled');
     log('文件传输通道已关闭');
@@ -315,14 +326,18 @@ function setupDataChannel(channel) {
     log('文件传输通道异常');
   });
 
-  channel.addEventListener('message', handleDataMessage);
+  channel.addEventListener('message', (event) => {
+    state.dataMessageChain = state.dataMessageChain
+      .then(() => handleDataMessage(event))
+      .catch((error) => log(`处理传输消息失败：${error.message}`));
+  });
 }
 
 function sendFiles(files) {
   const validFiles = files.filter(Boolean);
   if (!validFiles.length) return;
 
-  state.sendQueue.push(...validFiles);
+  state.sendQueue.push(...validFiles.map(createSendTask));
   log(`已加入发送队列：${validFiles.length} 个文件`);
 
   if (!isChannelReady()) {
@@ -333,22 +348,10 @@ function sendFiles(files) {
   processSendQueue();
 }
 
-async function processSendQueue() {
-  if (state.isSending || !isChannelReady()) return;
-  state.isSending = true;
-
-  while (state.sendQueue.length && isChannelReady()) {
-    const file = state.sendQueue.shift();
-    await sendFile(file);
-  }
-
-  state.isSending = false;
-}
-
-async function sendFile(file) {
+function createSendTask(file) {
   const fileId = createTaskId();
   const thumbnailUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : '';
-  const task = createTransferItem(elements.sendList, {
+  const element = createTransferItem(elements.sendList, {
     id: fileId,
     name: file.name,
     meta: `${formatBytes(file.size)} · 等待发送`,
@@ -356,76 +359,230 @@ async function sendFile(file) {
     thumbnailUrl,
   });
 
+  const task = {
+    id: fileId,
+    file,
+    name: file.name,
+    size: file.size,
+    mime: file.type,
+    offset: 0,
+    seq: 0,
+    element,
+    metaSent: false,
+    done: false,
+  };
   state.sendTasks.set(fileId, task);
-  sendData({ type: 'file-meta', id: fileId, name: file.name, size: file.size, mime: file.type });
-
-  let offset = 0;
-  while (offset < file.size) {
-    const chunk = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
-    await waitForBuffer();
-    sendData(chunk);
-    offset += chunk.byteLength;
-    updateTransferItem(task, offset / file.size, `${formatBytes(offset)} / ${formatBytes(file.size)}`);
-  }
-
-  sendData({ type: 'file-end', id: fileId });
-  updateTransferItem(task, 1, `${formatBytes(file.size)} · 已发送`);
-  log(`已发送：${file.name}`);
+  return task;
 }
 
-function handleDataMessage(event) {
+async function processSendQueue() {
+  if (state.isSending || !isChannelReady()) return;
+  state.isSending = true;
+
+  try {
+    while (isChannelReady() && (state.sendQueue.length || state.activeSendTasks.length)) {
+      fillActiveSendTasks();
+      if (!state.activeSendTasks.length) break;
+
+      for (const task of [...state.activeSendTasks]) {
+        if (!isChannelReady()) break;
+        await sendNextChunk(task);
+        if (task.offset >= task.size) {
+          finishSendTask(task);
+        }
+      }
+
+      state.activeSendTasks = state.activeSendTasks.filter((task) => !task.done);
+    }
+  } finally {
+    state.isSending = false;
+    if (isChannelReady() && state.sendQueue.length) {
+      processSendQueue();
+    }
+  }
+}
+
+function fillActiveSendTasks() {
+  while (state.activeSendTasks.length < MAX_CONCURRENT_SENDS && state.sendQueue.length) {
+    const task = state.sendQueue.shift();
+    state.activeSendTasks.push(task);
+    sendTaskMeta(task);
+  }
+}
+
+function sendTaskMeta(task) {
+  if (task.metaSent) return;
+  task.metaSent = true;
+  sendData({ type: 'file-meta', id: task.id, name: task.name, size: task.size, mime: task.mime });
+  updateTransferItem(task.element, 0, `${formatBytes(task.size)} · 发送中`);
+}
+
+async function sendNextChunk(task) {
+  if (task.done || task.offset >= task.size) return;
+
+  await waitForBuffer();
+  if (!isChannelReady()) return;
+
+  const chunk = await task.file.slice(task.offset, task.offset + CHUNK_SIZE).arrayBuffer();
+  sendData({ type: 'file-chunk', id: task.id, size: chunk.byteLength, seq: task.seq });
+  sendData(chunk);
+  task.offset += chunk.byteLength;
+  task.seq += 1;
+  updateTransferItem(task.element, task.size ? task.offset / task.size : 1, `${formatBytes(task.offset)} / ${formatBytes(task.size)}`);
+}
+
+function finishSendTask(task) {
+  if (task.done) return;
+  task.done = true;
+  sendData({ type: 'file-end', id: task.id });
+  updateTransferItem(task.element, 1, `${formatBytes(task.size)} · 已发送`);
+  log(`已发送：${task.name}`);
+}
+
+async function handleDataMessage(event) {
   if (typeof event.data === 'string') {
     const message = parseJson(event.data);
     if (!message) return;
-    handleControlMessage(message);
+    await handleControlMessage(message);
     return;
   }
 
-  handleFileChunk(event.data);
+  const header = state.pendingChunkHeaders.shift();
+  if (!header) {
+    log('收到缺少文件标识的分片，已忽略');
+    return;
+  }
+
+  await handleFileChunk(header.id, event.data, header);
 }
 
-function handleControlMessage(message) {
+async function handleControlMessage(message) {
   if (message.type === 'file-meta') {
-    const task = createTransferItem(elements.receiveList, {
-      id: message.id,
-      name: message.name,
-      meta: `${formatBytes(message.size)} · 接收中`,
-      mime: message.mime,
-      selectable: true,
-      disabledSelection: true,
-    });
+    await createReceiveTask(message);
+    return;
+  }
 
-    state.receiveTasks.set(message.id, {
+  if (message.type === 'file-chunk') {
+    if (!message.id) {
+      log('收到缺少文件 ID 的分片描述，已忽略');
+      return;
+    }
+    state.pendingChunkHeaders.push({
       id: message.id,
-      name: message.name || '未命名文件',
       size: Number(message.size) || 0,
-      mime: message.mime || 'application/octet-stream',
-      chunks: [],
-      received: 0,
-      element: task,
+      seq: Number(message.seq) || 0,
     });
-    log(`开始接收：${message.name}`);
     return;
   }
 
   if (message.type === 'file-end') {
-    finishReceive(message.id);
+    await finishReceive(message.id);
   }
 }
 
-function handleFileChunk(chunk) {
-  const task = [...state.receiveTasks.values()].find((item) => item.received < item.size);
-  if (!task) return;
+async function createReceiveTask(message) {
+  const fileId = message.id;
+  if (!fileId) return;
 
-  const buffer = chunk instanceof ArrayBuffer ? chunk : chunk.buffer;
-  task.chunks.push(buffer);
+  const element = createTransferItem(elements.receiveList, {
+    id: fileId,
+    name: message.name || '未命名文件',
+    meta: `${formatBytes(message.size)} · 接收中`,
+    mime: message.mime,
+    selectable: true,
+    disabledSelection: true,
+  });
+
+  const task = {
+    id: fileId,
+    name: message.name || '未命名文件',
+    size: Number(message.size) || 0,
+    mime: message.mime || 'application/octet-stream',
+    sinkType: 'blob',
+    chunks: [],
+    writer: null,
+    fileHandle: null,
+    writeChain: Promise.resolve(),
+    received: 0,
+    seqExpected: 0,
+    element,
+  };
+
+  state.receiveTasks.set(fileId, task);
+  await setupReceiveSink(task);
+  log(`开始接收：${task.name}`);
+}
+
+async function setupReceiveSink(task) {
+  if (!state.receiveDirectoryHandle || !isFileSystemReceiveSupported()) return;
+
+  try {
+    const { fileHandle, name } = await createAvailableReceiveFile(task.name);
+    const writer = await fileHandle.createWritable();
+    task.sinkType = 'fs';
+    task.chunks = null;
+    task.writer = writer;
+    task.fileHandle = fileHandle;
+    task.name = name;
+    task.element.querySelector('strong').textContent = name;
+    updateTransferItem(task.element, 0, `${formatBytes(task.size)} · 流式接收中`);
+  } catch (error) {
+    log(`流式保存不可用，改用标准接收：${error.message}`);
+  }
+}
+
+async function createAvailableReceiveFile(name) {
+  const safeName = sanitizeFileName(name || `received-${Date.now()}`);
+
+  for (let index = 0; index < 1000; index += 1) {
+    const candidate = index === 0 ? safeName : appendFileNameSuffix(safeName, index + 1);
+    try {
+      await state.receiveDirectoryHandle.getFileHandle(candidate);
+    } catch (error) {
+      if (error.name !== 'NotFoundError') throw error;
+      const fileHandle = await state.receiveDirectoryHandle.getFileHandle(candidate, { create: true });
+      return { fileHandle, name: candidate };
+    }
+  }
+
+  throw new Error('目录内同名文件过多');
+}
+
+async function handleFileChunk(fileId, chunk, header) {
+  const task = state.receiveTasks.get(fileId);
+  if (!task) {
+    log('收到未知文件的分片，已忽略');
+    return;
+  }
+
+  const buffer = await toArrayBuffer(chunk);
+  if (header.size && header.size !== buffer.byteLength) {
+    log(`分片大小异常：${task.name}`);
+  }
+  if (Number.isFinite(header.seq) && header.seq !== task.seqExpected) {
+    log(`分片顺序异常：${task.name}`);
+  }
+  task.seqExpected += 1;
+
+  if (task.sinkType === 'fs' && task.writer) {
+    task.writeChain = task.writeChain.then(() => task.writer.write(buffer));
+    await task.writeChain;
+  } else {
+    task.chunks.push(buffer);
+  }
+
   task.received += buffer.byteLength;
   updateTransferItem(task.element, task.size ? task.received / task.size : 0, `${formatBytes(task.received)} / ${formatBytes(task.size)}`);
 }
 
-function finishReceive(fileId) {
+async function finishReceive(fileId) {
   const task = state.receiveTasks.get(fileId);
   if (!task) return;
+
+  if (task.sinkType === 'fs') {
+    await finishFileSystemReceive(fileId, task);
+    return;
+  }
 
   const blob = new Blob(task.chunks, { type: task.mime });
   const url = URL.createObjectURL(blob);
@@ -437,6 +594,7 @@ function finishReceive(fileId) {
     mime: task.mime,
     blob,
     url,
+    storage: 'blob',
   });
 
   updateTransferItem(task.element, 1, `${formatBytes(blob.size)} · 已接收`);
@@ -462,6 +620,48 @@ function finishReceive(fileId) {
 
   updateBatchActions();
   log(`已接收：${safeName}`);
+}
+
+async function finishFileSystemReceive(fileId, task) {
+  try {
+    await task.writeChain;
+    await task.writer.close();
+    state.completedFiles.set(fileId, {
+      id: fileId,
+      name: task.name,
+      mime: task.mime,
+      size: task.received,
+      storage: 'fs',
+    });
+    updateTransferItem(task.element, 1, `${formatBytes(task.received)} · 已保存到目录`);
+    appendSavedLabel(task.element);
+    log(`已保存到目录：${task.name}`);
+  } catch (error) {
+    try {
+      await task.writer?.abort();
+    } catch {}
+    updateTransferItem(task.element, task.size ? task.received / task.size : 0, `${formatBytes(task.received)} · 保存失败`);
+    log(`保存失败：${task.name}，${error.message}`);
+  } finally {
+    state.receiveTasks.delete(fileId);
+    updateBatchActions();
+  }
+}
+
+function appendSavedLabel(item) {
+  const label = document.createElement('span');
+  label.className = 'saved-label';
+  label.textContent = '已保存';
+  item.append(label);
+}
+
+async function toArrayBuffer(chunk) {
+  if (chunk instanceof ArrayBuffer) return chunk;
+  if (chunk instanceof Blob) return chunk.arrayBuffer();
+  if (ArrayBuffer.isView(chunk)) {
+    return chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+  }
+  return chunk.buffer;
 }
 
 function createTransferItem(container, file) {
@@ -528,7 +728,8 @@ function enableTransferSelection(item, fileId) {
 }
 
 function setAllReceivedSelection(checked) {
-  for (const fileId of state.completedFiles.keys()) {
+  for (const [fileId, file] of state.completedFiles) {
+    if (!isBlobBackedFile(file)) continue;
     if (checked) {
       state.selectedFileIds.add(fileId);
     } else {
@@ -547,7 +748,7 @@ function setAllReceivedSelection(checked) {
 }
 
 function updateBatchActions() {
-  const total = state.completedFiles.size;
+  const total = [...state.completedFiles.values()].filter(isBlobBackedFile).length;
   const selected = getSelectedCompletedFiles().length;
 
   elements.selectAllFiles.disabled = total === 0;
@@ -561,7 +762,11 @@ function updateBatchActions() {
 function getSelectedCompletedFiles() {
   return [...state.selectedFileIds]
     .map((fileId) => state.completedFiles.get(fileId))
-    .filter(Boolean);
+    .filter(isBlobBackedFile);
+}
+
+function isBlobBackedFile(file) {
+  return Boolean(file?.blob && file?.url);
 }
 
 function downloadSelectedFilesDirectly() {
@@ -800,12 +1005,73 @@ function isChannelReady() {
 }
 
 function closePeerConnection() {
+  cleanupTransferRuntime();
   state.channel?.close();
   state.connection?.close();
   state.channel = null;
   state.connection = null;
   state.remotePeerId = '';
   elements.dropZone.classList.remove('enabled');
+}
+
+function cleanupTransferRuntime() {
+  state.pendingChunkHeaders = [];
+  state.dataMessageChain = Promise.resolve();
+  state.isSending = false;
+
+  for (const task of state.activeSendTasks) {
+    updateTransferItem(task.element, task.size ? task.offset / task.size : 0, `${formatBytes(task.offset)} · 传输中断`);
+  }
+  state.activeSendTasks = [];
+
+  for (const task of state.receiveTasks.values()) {
+    if (task.sinkType === 'fs' && task.writer) {
+      task.writer.abort().catch(() => {});
+    }
+    updateTransferItem(task.element, task.size ? task.received / task.size : 0, `${formatBytes(task.received)} · 接收中断`);
+  }
+  state.receiveTasks.clear();
+}
+
+async function selectReceiveDirectory() {
+  if (!isFileSystemReceiveSupported()) {
+    log('当前浏览器不支持流式保存到目录，将继续使用标准接收');
+    updateReceiveModeStatus();
+    return;
+  }
+
+  try {
+    state.receiveDirectoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    updateReceiveModeStatus();
+    log('已启用流式保存：后续接收文件会直接写入所选目录');
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      log('已取消选择接收目录');
+      return;
+    }
+    log(`选择接收目录失败：${error.message}`);
+  }
+}
+
+function isFileSystemReceiveSupported() {
+  return typeof window.showDirectoryPicker === 'function';
+}
+
+function updateReceiveModeStatus() {
+  if (!isFileSystemReceiveSupported()) {
+    elements.receiveModeStatus.textContent = '标准接收：当前环境不支持流式目录保存';
+    elements.selectReceiveDirBtn.disabled = true;
+    return;
+  }
+
+  elements.selectReceiveDirBtn.disabled = false;
+  if (state.receiveDirectoryHandle) {
+    elements.receiveModeStatus.textContent = '流式保存到目录：页面内不再缓存这些文件';
+    elements.selectReceiveDirBtn.textContent = '更换接收目录';
+  } else {
+    elements.receiveModeStatus.textContent = '标准接收：完成后生成下载链接';
+    elements.selectReceiveDirBtn.textContent = '选择接收目录（实验）';
+  }
 }
 
 async function copyShareLink() {
@@ -935,9 +1201,13 @@ function createUniqueFileName(name, usedNames) {
   usedNames.set(name, count + 1);
   if (count === 0) return name;
 
+  return appendFileNameSuffix(name, count + 1);
+}
+
+function appendFileNameSuffix(name, suffix) {
   const dotIndex = name.lastIndexOf('.');
-  if (dotIndex <= 0) return `${name}-${count + 1}`;
-  return `${name.slice(0, dotIndex)}-${count + 1}${name.slice(dotIndex)}`;
+  if (dotIndex <= 0) return `${name}-${suffix}`;
+  return `${name.slice(0, dotIndex)}-${suffix}${name.slice(dotIndex)}`;
 }
 
 function formatDateForFileName(date) {
