@@ -1,6 +1,8 @@
 const CHUNK_SIZE = 64 * 1024;
 const BUFFER_HIGH_WATER = 8 * 1024 * 1024;
 const MAX_CONCURRENT_SENDS = 5;
+const DEFAULT_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+const ICE_CONFIG_CACHE_MS = 5 * 60 * 1000;
 
 const elements = {
   connectionState: document.querySelector('#connectionState'),
@@ -27,6 +29,12 @@ const elements = {
   downloadZipBtn: document.querySelector('#downloadZipBtn'),
   clearLogBtn: document.querySelector('#clearLogBtn'),
   logList: document.querySelector('#logList'),
+};
+
+const iceConfigCache = {
+  value: null,
+  expiresAt: 0,
+  inFlight: null,
 };
 
 const state = {
@@ -218,7 +226,7 @@ async function handleSignal(message) {
     updatePeerStatus('已发现');
     elements.peerHint.textContent = '对端已加入，等待对端发起直连。';
     log('对端已加入房间');
-    ensurePeerConnection(false);
+    prefetchIceServers();
     return;
   }
 
@@ -240,7 +248,8 @@ async function handleSignal(message) {
 
   if (message.type === 'offer') {
     resetStalePeerConnection();
-    const pc = ensurePeerConnection(false);
+    const iceServers = await getIceServers();
+    const pc = ensurePeerConnection(false, iceServers);
     await pc.setRemoteDescription(message.description);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
@@ -266,23 +275,91 @@ async function handleSignal(message) {
   }
 }
 
+function prefetchIceServers() {
+  getIceServers({ silent: true });
+}
+
+async function getIceServers({ silent = false } = {}) {
+  const now = Date.now();
+  if (iceConfigCache.value && iceConfigCache.expiresAt > now) {
+    return iceConfigCache.value;
+  }
+
+  if (iceConfigCache.inFlight) {
+    return iceConfigCache.inFlight;
+  }
+
+  iceConfigCache.inFlight = fetch('/api/turn-credentials', {
+    cache: 'no-store',
+    credentials: 'same-origin',
+  })
+    .then(async (response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      const iceServers = normalizeIceServers(data.iceServers);
+      const serverExpiresAt = Date.parse(data.expiresAt);
+      iceConfigCache.value = iceServers;
+      iceConfigCache.expiresAt = Number.isFinite(serverExpiresAt)
+        ? Math.max(Date.now() + 30000, serverExpiresAt - 10000)
+        : Date.now() + ICE_CONFIG_CACHE_MS;
+      if (!silent) log('已加载中继网络配置');
+      return iceServers;
+    })
+    .catch((error) => {
+      if (!silent) log(`中继网络配置获取失败，已降级为基础直连模式：${error.message}`);
+      return DEFAULT_ICE_SERVERS;
+    })
+    .finally(() => {
+      iceConfigCache.inFlight = null;
+    });
+
+  return iceConfigCache.inFlight;
+}
+
+function normalizeIceServers(value) {
+  if (!Array.isArray(value)) throw new Error('ICE 配置格式异常');
+
+  const servers = value
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const urls = Array.isArray(item.urls) ? item.urls : [item.urls];
+      const validUrls = urls
+        .filter((url) => typeof url === 'string')
+        .map((url) => url.trim())
+        .filter((url) => /^(stun|stuns|turn|turns):/i.test(url));
+      if (!validUrls.length) return null;
+
+      const username = typeof item.username === 'string' ? item.username : '';
+      const credential = typeof item.credential === 'string' ? item.credential : '';
+      if (Boolean(username) !== Boolean(credential)) return null;
+
+      const server = { urls: validUrls.length === 1 ? validUrls[0] : validUrls };
+      if (username) {
+        server.username = username;
+        server.credential = credential;
+      }
+      return server;
+    })
+    .filter(Boolean);
+
+  if (!servers.length) throw new Error('ICE 配置为空');
+  return servers;
+}
+
 async function startAsOfferer() {
   resetStalePeerConnection();
-  const pc = ensurePeerConnection(true);
+  const iceServers = await getIceServers();
+  const pc = ensurePeerConnection(true, iceServers);
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   sendSignal({ type: 'offer', to: state.remotePeerId, description: pc.localDescription });
   log('已发起直连请求');
 }
 
-function ensurePeerConnection(isOfferer) {
+function ensurePeerConnection(isOfferer, iceServers = DEFAULT_ICE_SERVERS) {
   if (state.connection) return state.connection;
 
-  const pc = new RTCPeerConnection({
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-    ],
-  });
+  const pc = new RTCPeerConnection({ iceServers });
   state.connection = pc;
 
   pc.addEventListener('icecandidate', (event) => {
