@@ -1,5 +1,5 @@
 import { BUFFER_HIGH_WATER, DEFAULT_ICE_SERVERS } from '../config.js';
-import { describeCandidate, describeCandidatePair, describeIceUrl, summarizeIceServers } from '../utils/webrtc-diagnostics.js';
+import { describeCandidate, describeCandidatePair, describeIceUrl, isIPv4Candidate, isIPv6Candidate, summarizeIceServers } from '../utils/webrtc-diagnostics.js';
 
 export function createPeerService({ elements, state, statusUI, sendService, receiveService, getSignalApi, getCallApi }) {
   const {
@@ -23,17 +23,14 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
 
     pc.addEventListener('icecandidate', (event) => {
       if (!event.candidate) {
+        flushDelayedLocalCandidates('ICE 收集结束');
         log(`[诊断] 本地 ICE candidate 收集结束，共 ${state.iceLocalCandidateCount} 个`);
         return;
       }
 
       state.iceLocalCandidateCount += 1;
       log(`[诊断] 本地 ICE candidate #${state.iceLocalCandidateCount}：${describeCandidate(event.candidate)}`);
-      if (state.remotePeerId) {
-        getSignalApi().sendSignal({ type: 'candidate', to: state.remotePeerId, candidate: event.candidate });
-      } else {
-        log('[诊断] 本地 candidate 暂未发送：remotePeerId 为空');
-      }
+      queueOrSendLocalCandidate(event.candidate);
     });
 
     pc.addEventListener('icecandidateerror', (event) => {
@@ -68,6 +65,7 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
       };
       updatePeerStatus(statusMap[pc.connectionState] || pc.connectionState);
       if (pc.connectionState === 'connected') {
+        flushDelayedLocalCandidates('PeerConnection 已连接');
         updateConnectionPill('已连接', 'ok');
         updateConnectionTypeStatus('识别中');
         updateReconnectAvailability(false);
@@ -164,6 +162,61 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
     });
   }
 
+  function queueOrSendLocalCandidate(candidate) {
+    if (!state.remotePeerId) {
+      log('[诊断] 本地 candidate 暂未发送：remotePeerId 为空');
+      return;
+    }
+
+    if (isIPv6Candidate(candidate)) {
+      log(`[诊断] 优先发送 IPv6 ICE candidate：${describeCandidate(candidate)}`);
+      sendLocalCandidate(candidate);
+      return;
+    }
+
+    if (isIPv4Candidate(candidate)) {
+      state.delayedLocalCandidates.push(candidate);
+      log(`[诊断] 延迟发送 IPv4 ICE candidate 作为 fallback：${describeCandidate(candidate)}`);
+      scheduleDelayedLocalCandidateFlush();
+      return;
+    }
+
+    log(`[诊断] 立即发送非 IP ICE candidate：${describeCandidate(candidate)}`);
+    sendLocalCandidate(candidate);
+  }
+
+  function scheduleDelayedLocalCandidateFlush() {
+    if (state.delayedLocalCandidateTimer) return;
+    state.delayedLocalCandidateTimer = setTimeout(() => flushDelayedLocalCandidates('IPv6 优先窗口结束'), 900);
+  }
+
+  function flushDelayedLocalCandidates(reason) {
+    if (state.delayedLocalCandidateTimer) {
+      clearTimeout(state.delayedLocalCandidateTimer);
+      state.delayedLocalCandidateTimer = null;
+    }
+
+    const candidates = state.delayedLocalCandidates.splice(0);
+    if (!candidates.length) return;
+    log(`[诊断] ${reason}，发送 ${candidates.length} 个 IPv4 fallback candidate`);
+    for (const candidate of candidates) {
+      sendLocalCandidate(candidate);
+    }
+  }
+
+  function clearDelayedLocalCandidates() {
+    if (state.delayedLocalCandidateTimer) {
+      clearTimeout(state.delayedLocalCandidateTimer);
+      state.delayedLocalCandidateTimer = null;
+    }
+    state.delayedLocalCandidates = [];
+  }
+
+  function sendLocalCandidate(candidate) {
+    if (!state.remotePeerId) return;
+    getSignalApi().sendSignal({ type: 'candidate', to: state.remotePeerId, candidate });
+  }
+
   function hasActivePeerConnection() {
     return state.connection?.connectionState === 'connected' || isChannelReady();
   }
@@ -177,6 +230,7 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
     state.connection = null;
     state.connectionType = '';
     state.pendingCandidates = [];
+    clearDelayedLocalCandidates();
     state.iceLocalCandidateCount = 0;
     state.iceRemoteCandidateCount = 0;
     state.makingOffer = false;
@@ -294,6 +348,7 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
     state.connection = null;
     state.connectionType = '';
     state.pendingCandidates = [];
+    clearDelayedLocalCandidates();
     state.iceLocalCandidateCount = 0;
     state.iceRemoteCandidateCount = 0;
     state.makingOffer = false;

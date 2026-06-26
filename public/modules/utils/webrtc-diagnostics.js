@@ -36,6 +36,8 @@ export function describeCandidate(candidate) {
   const parts = candidateText.trim().split(/\s+/);
   const type = getCandidateField(parts, 'typ') || candidate?.type || candidate?.candidateType || 'unknown';
   const protocol = candidate?.protocol || parts[2] || 'unknown';
+  const address = getCandidateAddress(candidate);
+  const family = getCandidateAddressFamily(candidate);
   const port = candidate?.port || parts[5] || 'unknown';
   const tcpType = getCandidateField(parts, 'tcptype') || candidate?.tcpType || '';
   const relayProtocol = candidate?.relayProtocol || '';
@@ -44,6 +46,8 @@ export function describeCandidate(candidate) {
 
   return [
     `type=${type}`,
+    `family=${family}`,
+    address ? `address=${address}` : '',
     `protocol=${String(protocol).toUpperCase()}`,
     relayProtocol ? `relay=${relayProtocol}` : '',
     tcpType ? `tcp=${tcpType}` : '',
@@ -59,14 +63,38 @@ export function describeCandidatePair(localCandidate, remoteCandidate) {
 
 function describeCandidateReport(report) {
   if (!report) return '无';
+  const address = report.address || report.ip || '';
   return [
     `type=${report.candidateType || report.type || 'unknown'}`,
+    `family=${getAddressFamily(address)}`,
+    address ? `address=${address}` : '',
     `protocol=${String(report.protocol || 'unknown').toUpperCase()}`,
     report.relayProtocol ? `relay=${report.relayProtocol}` : '',
     report.tcpType ? `tcp=${report.tcpType}` : '',
     report.port ? `port=${report.port}` : '',
     report.url ? `url=${describeIceUrl(report.url)}` : '',
   ].filter(Boolean).join(', ');
+}
+
+export function getCandidateAddress(candidate) {
+  if (candidate?.address) return candidate.address;
+  if (candidate?.ip) return candidate.ip;
+
+  const candidateText = candidate?.candidate || String(candidate || '');
+  const parts = candidateText.trim().split(/\s+/);
+  return parts[4] || '';
+}
+
+export function getCandidateAddressFamily(candidate) {
+  return getAddressFamily(getCandidateAddress(candidate));
+}
+
+export function isIPv6Candidate(candidate) {
+  return getCandidateAddressFamily(candidate) === 'IPv6';
+}
+
+export function isIPv4Candidate(candidate) {
+  return getCandidateAddressFamily(candidate) === 'IPv4';
 }
 
 function parseIceUrl(rawUrl) {
@@ -81,4 +109,12 @@ function parseIceUrl(rawUrl) {
 function getCandidateField(parts, fieldName) {
   const index = parts.indexOf(fieldName);
   return index >= 0 ? parts[index + 1] : '';
+}
+
+function getAddressFamily(address) {
+  if (!address) return 'unknown';
+  if (/^([0-9]{1,3}\.){3}[0-9]{1,3}$/.test(address)) return 'IPv4';
+  if (address.includes(':')) return 'IPv6';
+  if (address.endsWith('.local')) return 'mDNS';
+  return 'unknown';
 }

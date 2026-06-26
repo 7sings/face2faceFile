@@ -31,6 +31,8 @@ export const state = {
   pendingCandidates: [],
   iceLocalCandidateCount: 0,
   iceRemoteCandidateCount: 0,
+  delayedLocalCandidates: [],
+  delayedLocalCandidateTimer: null,
   signalHeartbeat: null,
   signalReconnectTimer: null,
   receiveTasks: new Map(),

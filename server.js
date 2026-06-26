@@ -8,7 +8,7 @@ const WebSocket = require('ws');
 loadEnvFile();
 
 const PORT = Number(process.env.PORT || 8090);
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = process.env.HOST || '::';
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const METERED_TURN_URL = 'https://rockwu.metered.live/api/v1/turn/credentials';
 const TURN_CACHE_MS = 60 * 1000;
@@ -166,11 +166,15 @@ wss.on('close', () => clearInterval(heartbeat));
 
 server.listen(PORT, HOST, () => {
   console.log('面对面快传已启动');
+  console.log(`监听地址: ${HOST}:${PORT}`);
   console.log(`本机访问: http://localhost:${PORT}`);
-  for (const ip of getLocalIPv4List()) {
-    console.log(`局域网访问: http://${ip}:${PORT}`);
+  for (const ip of getLocalIPv6List()) {
+    console.log(`IPv6 访问: http://[${ip}]:${PORT}`);
   }
-  console.log('让两台设备连接同一个 Wi-Fi，并用上面的局域网地址打开页面。');
+  for (const ip of getLocalIPv4List()) {
+    console.log(`IPv4 访问: http://${ip}:${PORT}`);
+  }
+  console.log('优先使用 IPv6 地址访问；如果不可用，再使用 IPv4 地址。');
 });
 
 function loadEnvFile() {
@@ -452,6 +456,21 @@ function normalizeToken(value) {
   if (typeof value !== 'string') return '';
   const token = value.trim();
   return /^[a-zA-Z0-9_-]{4,80}$/.test(token) ? token : '';
+}
+
+function getLocalIPv6List() {
+  const ips = [];
+  const interfaces = os.networkInterfaces();
+
+  for (const addresses of Object.values(interfaces)) {
+    for (const address of addresses || []) {
+      if (address.family === 'IPv6' && !address.internal && !address.address.toLowerCase().startsWith('fe80:')) {
+        ips.push(address.address);
+      }
+    }
+  }
+
+  return ips;
 }
 
 function getLocalIPv4List() {
