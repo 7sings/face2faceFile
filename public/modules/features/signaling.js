@@ -1,0 +1,270 @@
+import { DEFAULT_ICE_SERVERS, ICE_CONFIG_CACHE_MS } from '../config.js';
+import { iceConfigCache } from '../state.js';
+import { parseJson } from '../utils/common.js';
+
+export function createSignalingService({ elements, state, statusUI, peerService }) {
+  const {
+    log,
+    updateChannelStatus,
+    updateConnectionPill,
+    updatePeerStatus,
+    updateReconnectAvailability,
+    updateSignalStatus,
+  } = statusUI;
+
+  function connectSignal({ preservePeer = false } = {}) {
+    if (state.socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(state.socket.readyState)) return;
+
+    if (!preservePeer) {
+      peerService.closePeerConnection();
+    }
+
+    clearSignalHeartbeat();
+    clearTimeout(state.signalReconnectTimer);
+    updateSignalStatus('连接中');
+    if (!peerService.isChannelReady()) {
+      updateConnectionPill('连接信令中', 'pending');
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${protocol}//${window.location.host}/signal?room=${encodeURIComponent(state.roomId)}&peer=${encodeURIComponent(state.peerId)}`;
+    const socket = new WebSocket(url);
+    state.socket = socket;
+
+    socket.addEventListener('open', () => {
+      state.manualReconnectInProgress = false;
+      updateReconnectAvailability(false);
+      updateSignalStatus('已连接');
+      if (!peerService.isChannelReady()) {
+        updateConnectionPill('等待对端', 'pending');
+      }
+      startSignalHeartbeat();
+      log('信令服务已连接');
+    });
+
+    socket.addEventListener('message', async (event) => {
+      const message = parseJson(event.data);
+      if (!message) return;
+      await handleSignal(message);
+    });
+
+    socket.addEventListener('close', () => {
+      clearSignalHeartbeat();
+      if (state.suppressSocketCloseReconnect && state.socket !== socket) {
+        state.suppressSocketCloseReconnect = false;
+        return;
+      }
+
+      if (state.socket === socket) {
+        state.socket = null;
+      }
+      state.manualReconnectInProgress = false;
+      updateSignalStatus('重连中');
+
+      if (peerService.isChannelReady()) {
+        elements.peerHint.textContent = '文件通道仍可用，正在后台重连信令服务。';
+        updateReconnectAvailability(false);
+        log('信令连接已断开，正在后台重连；已建立的文件通道不受影响');
+      } else {
+        updatePeerStatus('未发现');
+        updateChannelStatus('未建立');
+        updateConnectionPill('信令重连中', 'pending');
+        updateReconnectAvailability(true);
+        log('信令连接已断开，正在重连');
+      }
+
+      state.signalReconnectTimer = setTimeout(() => connectSignal({ preservePeer: true }), 1500);
+    });
+
+    socket.addEventListener('error', () => {
+      state.manualReconnectInProgress = false;
+      updateSignalStatus('连接异常');
+      if (!peerService.isChannelReady()) {
+        updateConnectionPill('信令异常', 'error');
+        elements.peerHint.textContent = '信令连接异常，可尝试局部重连。';
+        updateReconnectAvailability(true);
+      }
+    });
+  }
+
+  async function handleSignal(message) {
+    if (message.type === 'pong') return;
+
+    if (message.type === 'welcome') {
+      if (message.peers.length) {
+        state.remotePeerId = message.peers[0];
+        if (peerService.hasActivePeerConnection()) {
+          updatePeerStatus('已直连');
+          return;
+        }
+        updatePeerStatus('已发现');
+        elements.peerHint.textContent = '发现对端，正在建立直连通道。';
+        await startAsOfferer();
+      }
+      return;
+    }
+
+    if (message.type === 'peer-joined') {
+      state.remotePeerId = message.peerId;
+      if (peerService.hasActivePeerConnection()) return;
+
+      updatePeerStatus('已发现');
+      elements.peerHint.textContent = '对端已加入，等待对端发起直连。';
+      log('对端已加入房间');
+      prefetchIceServers();
+      return;
+    }
+
+    if (message.type === 'peer-left') {
+      if (message.peerId === state.remotePeerId) {
+        log('对端已离开房间');
+        state.remotePeerId = '';
+        updatePeerStatus('已离开');
+        updateChannelStatus('未建立');
+        updateConnectionPill('等待对端', 'pending');
+        peerService.closePeerConnection();
+      }
+      return;
+    }
+
+    if (message.from && !state.remotePeerId) {
+      state.remotePeerId = message.from;
+    }
+
+    if (message.type === 'offer') {
+      peerService.resetStalePeerConnection();
+      const iceServers = await getIceServers();
+      const pc = peerService.ensurePeerConnection(false, iceServers);
+      await pc.setRemoteDescription(message.description);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      sendSignal({ type: 'answer', to: message.from, description: pc.localDescription });
+      log('已响应直连请求');
+      return;
+    }
+
+    if (message.type === 'answer') {
+      if (state.connection) {
+        await state.connection.setRemoteDescription(message.description);
+        log('对端已接受直连请求');
+      }
+      return;
+    }
+
+    if (message.type === 'candidate' && message.candidate && state.connection) {
+      try {
+        await state.connection.addIceCandidate(message.candidate);
+      } catch (error) {
+        log(`添加网络候选失败：${error.message}`);
+      }
+    }
+  }
+
+  function prefetchIceServers() {
+    getIceServers({ silent: true });
+  }
+
+  async function getIceServers({ silent = false } = {}) {
+    const now = Date.now();
+    if (iceConfigCache.value && iceConfigCache.expiresAt > now) {
+      return iceConfigCache.value;
+    }
+
+    if (iceConfigCache.inFlight) {
+      return iceConfigCache.inFlight;
+    }
+
+    iceConfigCache.inFlight = fetch('/api/turn-credentials', {
+      cache: 'no-store',
+      credentials: 'same-origin',
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const iceServers = normalizeIceServers(data.iceServers);
+        const serverExpiresAt = Date.parse(data.expiresAt);
+        iceConfigCache.value = iceServers;
+        iceConfigCache.expiresAt = Number.isFinite(serverExpiresAt)
+          ? Math.max(Date.now() + 30000, serverExpiresAt - 10000)
+          : Date.now() + ICE_CONFIG_CACHE_MS;
+        if (!silent) log('已加载中继网络配置');
+        return iceServers;
+      })
+      .catch((error) => {
+        if (!silent) log(`中继网络配置获取失败，已降级为基础直连模式：${error.message}`);
+        return DEFAULT_ICE_SERVERS;
+      })
+      .finally(() => {
+        iceConfigCache.inFlight = null;
+      });
+
+    return iceConfigCache.inFlight;
+  }
+
+  function normalizeIceServers(value) {
+    if (!Array.isArray(value)) throw new Error('ICE 配置格式异常');
+
+    const servers = value
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null;
+        const urls = Array.isArray(item.urls) ? item.urls : [item.urls];
+        const validUrls = urls
+          .filter((url) => typeof url === 'string')
+          .map((url) => url.trim())
+          .filter((url) => /^(stun|stuns|turn|turns):/i.test(url));
+        if (!validUrls.length) return null;
+
+        const username = typeof item.username === 'string' ? item.username : '';
+        const credential = typeof item.credential === 'string' ? item.credential : '';
+        if (Boolean(username) !== Boolean(credential)) return null;
+
+        const server = { urls: validUrls.length === 1 ? validUrls[0] : validUrls };
+        if (username) {
+          server.username = username;
+          server.credential = credential;
+        }
+        return server;
+      })
+      .filter(Boolean);
+
+    if (!servers.length) throw new Error('ICE 配置为空');
+    return servers;
+  }
+
+  async function startAsOfferer() {
+    peerService.resetStalePeerConnection();
+    const iceServers = await getIceServers();
+    const pc = peerService.ensurePeerConnection(true, iceServers);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    sendSignal({ type: 'offer', to: state.remotePeerId, description: pc.localDescription });
+    log('已发起直连请求');
+  }
+
+  function startSignalHeartbeat() {
+    clearSignalHeartbeat();
+    state.signalHeartbeat = setInterval(() => {
+      sendSignal({ type: 'ping', now: Date.now() });
+    }, 15000);
+  }
+
+  function clearSignalHeartbeat() {
+    if (!state.signalHeartbeat) return;
+    clearInterval(state.signalHeartbeat);
+    state.signalHeartbeat = null;
+  }
+
+  function sendSignal(message) {
+    if (state.socket?.readyState === WebSocket.OPEN) {
+      state.socket.send(JSON.stringify(message));
+    }
+  }
+
+  return {
+    connectSignal,
+    sendSignal,
+    clearSignalHeartbeat,
+    getIceServers,
+    prefetchIceServers,
+  };
+}
