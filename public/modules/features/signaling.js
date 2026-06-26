@@ -262,6 +262,11 @@ export function createSignalingService({ elements, state, statusUI, peerService,
     const pc = state.connection;
     if (!pc || pc.signalingState === 'closed' || !state.remotePeerId) return;
     if (state.makingOffer) return;
+    if (pc.signalingState !== 'stable') {
+      state.pendingNegotiationReason = reason;
+      log(`[诊断] 延迟 offer：reason=${reason}, signaling=${pc.signalingState}`);
+      return;
+    }
 
     try {
       state.makingOffer = true;

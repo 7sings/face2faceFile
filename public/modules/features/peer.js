@@ -51,6 +51,11 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
 
     pc.addEventListener('signalingstatechange', () => {
       log(`[诊断] signalingState=${pc.signalingState}`);
+      if (pc.signalingState === 'stable' && state.pendingNegotiationReason) {
+        const reason = state.pendingNegotiationReason;
+        state.pendingNegotiationReason = '';
+        getSignalApi().requestNegotiation(reason);
+      }
     });
 
     pc.addEventListener('connectionstatechange', () => {
@@ -235,6 +240,7 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
     state.iceRemoteCandidateCount = 0;
     state.makingOffer = false;
     state.ignoreOffer = false;
+    state.pendingNegotiationReason = '';
     updateChannelStatus('重新建链中');
     updateConnectionTypeStatus('重新建链中');
   }
@@ -354,6 +360,7 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
     state.makingOffer = false;
     state.ignoreOffer = false;
     state.isSettingRemoteAnswerPending = false;
+    state.pendingNegotiationReason = '';
     state.remotePeerId = '';
     updateConnectionTypeStatus('未建立');
     elements.dropZone.classList.remove('enabled');

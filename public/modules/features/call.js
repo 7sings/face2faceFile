@@ -38,7 +38,10 @@ export function createCallService({ elements, state, statusUI, getPeerApi, getSi
       state.isCameraOff = false;
       state.hasLocalMedia = true;
       bindVideo(elements.localVideo, stream, elements.localVideoPlaceholder);
-      attachLocalTracks(pc, stream);
+      const addedTrackCount = attachLocalTracks(pc, stream);
+      if (addedTrackCount > 0) {
+        getSignalApi().requestNegotiation('start-call');
+      }
       setCallState(state.hasRemoteMedia ? 'in-call' : 'calling', state.hasRemoteMedia ? '通话中' : '本地预览已开启', state.hasRemoteMedia ? '已与对端建立音视频通话。' : '等待对端开启音视频。');
       updateCallButtons();
       log('已开启本地音视频');
@@ -52,10 +55,13 @@ export function createCallService({ elements, state, statusUI, getPeerApi, getSi
 
   function attachLocalTracks(pc, stream) {
     const existingTracks = new Set(state.mediaSenders.map((sender) => sender.track).filter(Boolean));
+    let addedTrackCount = 0;
     for (const track of stream.getTracks()) {
       if (existingTracks.has(track)) continue;
       state.mediaSenders.push(pc.addTrack(track, stream));
+      addedTrackCount += 1;
     }
+    return addedTrackCount;
   }
 
   function handleRemoteTrack(event) {
@@ -71,17 +77,18 @@ export function createCallService({ elements, state, statusUI, getPeerApi, getSi
       track.addEventListener('ended', updateRemoteMediaState, { once: true });
       track.addEventListener('mute', updateRemoteMediaState);
       track.addEventListener('unmute', updateRemoteMediaState);
+      log(`[诊断] 收到远端 ${track.kind} track：readyState=${track.readyState}, muted=${track.muted}`);
     }
 
-    state.hasRemoteMedia = state.remoteStream.getTracks().some((track) => track.readyState === 'live');
-    bindVideo(elements.remoteVideo, state.remoteStream, elements.remoteVideoPlaceholder);
-    setCallState('in-call', '通话中', state.hasLocalMedia ? '已与对端建立音视频通话。' : '正在接收对端音视频，你也可以开启本地音视频。');
-    updateCallButtons();
+    updateRemoteMediaState();
   }
 
   function updateRemoteMediaState() {
-    state.hasRemoteMedia = Boolean(state.remoteStream?.getTracks().some((track) => track.readyState === 'live' && !track.muted));
-    if (!state.hasRemoteMedia) {
+    state.hasRemoteMedia = Boolean(state.remoteStream?.getTracks().some((track) => track.readyState === 'live'));
+    if (state.hasRemoteMedia) {
+      bindVideo(elements.remoteVideo, state.remoteStream, elements.remoteVideoPlaceholder);
+      setCallState('in-call', '通话中', state.hasLocalMedia ? '已与对端建立音视频通话。' : '正在接收对端音视频，你也可以开启本地音视频。');
+    } else {
       clearVideo(elements.remoteVideo, elements.remoteVideoPlaceholder);
       if (!state.hasLocalMedia) {
         setCallState('idle', '未开始通话', '请先等待 P2P 连接成功，再开启通话。');

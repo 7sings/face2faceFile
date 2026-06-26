@@ -28,6 +28,7 @@ export const state = {
   ignoreOffer: false,
   isSettingRemoteAnswerPending: false,
   isPolite: false,
+  pendingNegotiationReason: '',
   pendingCandidates: [],
   iceLocalCandidateCount: 0,
   iceRemoteCandidateCount: 0,
