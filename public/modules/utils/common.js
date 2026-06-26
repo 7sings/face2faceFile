@@ -15,7 +15,27 @@ export function createRoomCode() {
 }
 
 export function createPeerId() {
-  return `peer_${crypto.getRandomValues(new Uint32Array(2)).join('_')}`;
+  const storageKey = 'face2face-file-transfer-peer-id';
+  const storedPeerId = readStorageValue(storageKey);
+  if (/^peer_\d+_\d+$/.test(storedPeerId)) return storedPeerId;
+
+  const peerId = `peer_${crypto.getRandomValues(new Uint32Array(2)).join('_')}`;
+  writeStorageValue(storageKey, peerId);
+  return peerId;
+}
+
+function readStorageValue(key) {
+  try {
+    return window.localStorage.getItem(key) || '';
+  } catch {
+    return '';
+  }
+}
+
+function writeStorageValue(key, value) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {}
 }
 
 export function createTaskId() {

@@ -101,7 +101,10 @@ export function createSignalingService({ elements, state, statusUI, peerService,
     if (message.type === 'welcome') {
       log(`[诊断] 收到 welcome：peers=${message.peers.length}`);
       if (message.peers.length) {
-        state.remotePeerId = message.peers[0];
+        if (message.peers.length > 1) {
+          log('检测到房间内有多个对端，优先连接最近加入的设备；建议一对一使用新房间。');
+        }
+        state.remotePeerId = message.peers[message.peers.length - 1];
         updateNegotiationRole();
         if (peerService.hasActivePeerConnection()) {
           updatePeerStatus('已直连');

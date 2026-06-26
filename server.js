@@ -92,6 +92,7 @@ wss.on('connection', (ws, _req, { roomId, peerId }) => {
   ws.isAlive = true;
 
   const peers = getRoom(roomId);
+  pruneClosedPeers(peers);
   const oldPeer = peers.get(peerId);
   if (oldPeer && oldPeer.readyState === WebSocket.OPEN) {
     oldPeer.close(4000, 'same peer reconnected');
@@ -103,7 +104,7 @@ wss.on('connection', (ws, _req, { roomId, peerId }) => {
     type: 'welcome',
     roomId,
     peerId,
-    peers: [...peers.keys()].filter((id) => id !== peerId),
+    peers: getOpenPeerIds(peers).filter((id) => id !== peerId),
   });
 
   broadcast(roomId, { type: 'peer-joined', peerId }, peerId);
@@ -432,9 +433,25 @@ function send(ws, data) {
   }
 }
 
+function getOpenPeerIds(peers) {
+  pruneClosedPeers(peers);
+  return [...peers.entries()]
+    .filter(([, peer]) => peer.readyState === WebSocket.OPEN)
+    .map(([peerId]) => peerId);
+}
+
+function pruneClosedPeers(peers) {
+  for (const [peerId, peer] of peers) {
+    if (![WebSocket.OPEN, WebSocket.CONNECTING].includes(peer.readyState)) {
+      peers.delete(peerId);
+    }
+  }
+}
+
 function broadcast(roomId, data, exceptPeerId) {
   const peers = rooms.get(roomId);
   if (!peers) return;
+  pruneClosedPeers(peers);
 
   for (const [peerId, peer] of peers) {
     if (peerId !== exceptPeerId) {
