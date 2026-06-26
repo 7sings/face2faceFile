@@ -1,6 +1,7 @@
 import { DEFAULT_ICE_SERVERS, ICE_CONFIG_CACHE_MS } from '../config.js';
 import { iceConfigCache } from '../state.js';
 import { parseJson } from '../utils/common.js';
+import { describeCandidate, summarizeIceServers } from '../utils/webrtc-diagnostics.js';
 
 export function createSignalingService({ elements, state, statusUI, peerService, getCallApi }) {
   const {
@@ -39,7 +40,7 @@ export function createSignalingService({ elements, state, statusUI, peerService,
         updateConnectionPill('等待对端', 'pending');
       }
       startSignalHeartbeat();
-      log('信令服务已连接');
+      log(`信令服务已连接：room=${state.roomId}, peer=${state.peerId}`);
     });
 
     socket.addEventListener('message', async (event) => {
@@ -98,6 +99,7 @@ export function createSignalingService({ elements, state, statusUI, peerService,
     }
 
     if (message.type === 'welcome') {
+      log(`[诊断] 收到 welcome：peers=${message.peers.length}`);
       if (message.peers.length) {
         state.remotePeerId = message.peers[0];
         updateNegotiationRole();
@@ -114,6 +116,7 @@ export function createSignalingService({ elements, state, statusUI, peerService,
 
     if (message.type === 'peer-joined') {
       state.remotePeerId = message.peerId;
+      log(`[诊断] peer-joined：remotePeerId=${state.remotePeerId}`);
       updateNegotiationRole();
       if (peerService.hasActivePeerConnection()) return;
 
@@ -166,6 +169,7 @@ export function createSignalingService({ elements, state, statusUI, peerService,
 
     const readyForOffer = !state.makingOffer && (pc.signalingState === 'stable' || state.isSettingRemoteAnswerPending);
     const offerCollision = !readyForOffer;
+    log(`[诊断] 收到 offer：reason=${message.reason || 'unknown'}, signaling=${pc.signalingState}, makingOffer=${state.makingOffer}, polite=${state.isPolite}, collision=${offerCollision}`);
     state.ignoreOffer = !state.isPolite && offerCollision;
     if (state.ignoreOffer) {
       log('已忽略一次冲突的通话协商请求');
@@ -193,6 +197,7 @@ export function createSignalingService({ elements, state, statusUI, peerService,
   async function handleAnswer(message) {
     if (!state.connection) return;
 
+    log(`[诊断] 收到 answer：signaling=${state.connection.signalingState}, pendingCandidates=${state.pendingCandidates.length}`);
     try {
       state.isSettingRemoteAnswerPending = true;
       await state.connection.setRemoteDescription(message.description);
@@ -209,21 +214,27 @@ export function createSignalingService({ elements, state, statusUI, peerService,
   async function handleCandidate(candidate) {
     if (state.ignoreOffer) return;
 
+    state.iceRemoteCandidateCount += 1;
+    const summary = describeCandidate(candidate);
+
     if (!state.connection) {
       state.pendingCandidates.push(candidate);
+      log(`[诊断] 缓存远端 ICE candidate #${state.iceRemoteCandidateCount}：${summary}（等待 PeerConnection）`);
       return;
     }
 
     if (!state.connection.remoteDescription) {
       state.pendingCandidates.push(candidate);
+      log(`[诊断] 缓存远端 ICE candidate #${state.iceRemoteCandidateCount}：${summary}（等待 remoteDescription）`);
       return;
     }
 
     try {
       await state.connection.addIceCandidate(candidate);
+      log(`[诊断] 已添加远端 ICE candidate #${state.iceRemoteCandidateCount}：${summary}`);
     } catch (error) {
       if (!state.ignoreOffer) {
-        log(`添加网络候选失败：${error.message}`);
+        log(`添加网络候选失败：${error.message}；candidate=${summary}`);
       }
     }
   }
@@ -231,12 +242,17 @@ export function createSignalingService({ elements, state, statusUI, peerService,
   async function flushPendingCandidates() {
     if (!state.connection?.remoteDescription) return;
     const candidates = state.pendingCandidates.splice(0);
+    if (candidates.length) {
+      log(`[诊断] 开始添加缓存 ICE candidate：${candidates.length} 个`);
+    }
     for (const candidate of candidates) {
+      const summary = describeCandidate(candidate);
       try {
         await state.connection.addIceCandidate(candidate);
+        log(`[诊断] 已添加缓存远端 ICE candidate：${summary}`);
       } catch (error) {
         if (!state.ignoreOffer) {
-          log(`添加缓存网络候选失败：${error.message}`);
+          log(`添加缓存网络候选失败：${error.message}；candidate=${summary}`);
         }
       }
     }
@@ -249,6 +265,7 @@ export function createSignalingService({ elements, state, statusUI, peerService,
 
     try {
       state.makingOffer = true;
+      log(`[诊断] 发起 offer：reason=${reason}, signaling=${pc.signalingState}, ice=${pc.iceConnectionState}`);
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       sendSignal({ type: 'offer', to: state.remotePeerId, description: pc.localDescription, reason });
@@ -291,11 +308,11 @@ export function createSignalingService({ elements, state, statusUI, peerService,
         iceConfigCache.expiresAt = Number.isFinite(serverExpiresAt)
           ? Math.max(Date.now() + 30000, serverExpiresAt - 10000)
           : Date.now() + ICE_CONFIG_CACHE_MS;
-        if (!silent) log('已加载中继网络配置');
+        if (!silent) log(`已加载中继网络配置：${summarizeIceServers(iceServers)}`);
         return iceServers;
       })
       .catch((error) => {
-        if (!silent) log(`中继网络配置获取失败，已降级为基础直连模式：${error.message}`);
+        if (!silent) log(`中继网络配置获取失败，已降级为基础直连模式：${error.message}；fallback=${summarizeIceServers(DEFAULT_ICE_SERVERS)}`);
         return DEFAULT_ICE_SERVERS;
       })
       .finally(() => {

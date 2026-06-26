@@ -1,4 +1,5 @@
 import { BUFFER_HIGH_WATER, DEFAULT_ICE_SERVERS } from '../config.js';
+import { describeCandidate, describeCandidatePair, describeIceUrl, summarizeIceServers } from '../utils/webrtc-diagnostics.js';
 
 export function createPeerService({ elements, state, statusUI, sendService, receiveService, getSignalApi, getCallApi }) {
   const {
@@ -16,14 +17,47 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
 
     const pc = new RTCPeerConnection({ iceServers });
     state.connection = pc;
+    state.iceLocalCandidateCount = 0;
+    state.iceRemoteCandidateCount = 0;
+    log(`[诊断] 创建 RTCPeerConnection：role=${isOfferer ? 'offerer' : 'answerer'}，ICE=${summarizeIceServers(iceServers)}`);
 
     pc.addEventListener('icecandidate', (event) => {
-      if (event.candidate && state.remotePeerId) {
+      if (!event.candidate) {
+        log(`[诊断] 本地 ICE candidate 收集结束，共 ${state.iceLocalCandidateCount} 个`);
+        return;
+      }
+
+      state.iceLocalCandidateCount += 1;
+      log(`[诊断] 本地 ICE candidate #${state.iceLocalCandidateCount}：${describeCandidate(event.candidate)}`);
+      if (state.remotePeerId) {
         getSignalApi().sendSignal({ type: 'candidate', to: state.remotePeerId, candidate: event.candidate });
+      } else {
+        log('[诊断] 本地 candidate 暂未发送：remotePeerId 为空');
       }
     });
 
+    pc.addEventListener('icecandidateerror', (event) => {
+      const urlText = event.url ? describeIceUrl(event.url) : '未知 ICE URL';
+      log(`[诊断] ICE candidate error：url=${urlText}, code=${event.errorCode || 'unknown'}, text=${event.errorText || 'unknown'}`);
+    });
+
+    pc.addEventListener('icegatheringstatechange', () => {
+      log(`[诊断] ICE gatheringState=${pc.iceGatheringState}`);
+    });
+
+    pc.addEventListener('iceconnectionstatechange', () => {
+      log(`[诊断] ICE connectionState=${pc.iceConnectionState}`);
+      if (['connected', 'completed', 'failed'].includes(pc.iceConnectionState)) {
+        logSelectedCandidatePair(pc, `ICE ${pc.iceConnectionState}`);
+      }
+    });
+
+    pc.addEventListener('signalingstatechange', () => {
+      log(`[诊断] signalingState=${pc.signalingState}`);
+    });
+
     pc.addEventListener('connectionstatechange', () => {
+      log(`[诊断] PeerConnection connectionState=${pc.connectionState}, ice=${pc.iceConnectionState}, signaling=${pc.signalingState}, gathering=${pc.iceGatheringState}`);
       const statusMap = {
         new: '准备中',
         connecting: '连接中',
@@ -54,6 +88,7 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
         updateReconnectAvailability(true);
         elements.peerHint.textContent = '连接失败，可点击“局部重连”重建连接。';
         log('连接失败：请确认两台设备在同一局域网，且浏览器支持 WebRTC');
+        logSelectedCandidatePair(pc, '连接失败');
       }
       if (pc.connectionState === 'closed') {
         state.connectionType = '';
@@ -142,6 +177,8 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
     state.connection = null;
     state.connectionType = '';
     state.pendingCandidates = [];
+    state.iceLocalCandidateCount = 0;
+    state.iceRemoteCandidateCount = 0;
     state.makingOffer = false;
     state.ignoreOffer = false;
     updateChannelStatus('重新建链中');
@@ -181,6 +218,7 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
 
       updateConnectionTypeStatus(connectionType);
       elements.peerHint.textContent = `连接方式：${connectionType}，可以开始发送文件。`;
+      log(`[诊断] 已选中候选对：${describeCandidatePair(localCandidate, remoteCandidate)}`);
       if (state.connectionType !== connectionType) {
         state.connectionType = connectionType;
         log(`P2P 连接方式：${connectionType}`);
@@ -230,6 +268,23 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
     return '';
   }
 
+  async function logSelectedCandidatePair(pc, reason) {
+    try {
+      const stats = await pc.getStats();
+      const pair = getSelectedCandidatePair(stats);
+      if (!pair) {
+        log(`[诊断] ${reason}：未找到 selected candidate pair`);
+        return;
+      }
+
+      const localCandidate = pair.localCandidateId ? stats.get(pair.localCandidateId) : null;
+      const remoteCandidate = pair.remoteCandidateId ? stats.get(pair.remoteCandidateId) : null;
+      log(`[诊断] ${reason} 候选对：state=${pair.state || 'unknown'}, nominated=${Boolean(pair.nominated)}, bytesSent=${pair.bytesSent || 0}, bytesReceived=${pair.bytesReceived || 0}, ${describeCandidatePair(localCandidate, remoteCandidate)}`);
+    } catch (error) {
+      log(`[诊断] ${reason} 候选对读取失败：${error.message}`);
+    }
+  }
+
   function closePeerConnection() {
     getCallApi().cleanupMedia({ removeSenders: false });
     cleanupTransferRuntime();
@@ -239,6 +294,8 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
     state.connection = null;
     state.connectionType = '';
     state.pendingCandidates = [];
+    state.iceLocalCandidateCount = 0;
+    state.iceRemoteCandidateCount = 0;
     state.makingOffer = false;
     state.ignoreOffer = false;
     state.isSettingRemoteAnswerPending = false;

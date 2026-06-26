@@ -29,6 +29,8 @@ export const state = {
   isSettingRemoteAnswerPending: false,
   isPolite: false,
   pendingCandidates: [],
+  iceLocalCandidateCount: 0,
+  iceRemoteCandidateCount: 0,
   signalHeartbeat: null,
   signalReconnectTimer: null,
   receiveTasks: new Map(),
