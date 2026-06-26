@@ -1,6 +1,6 @@
 import { BUFFER_HIGH_WATER, DEFAULT_ICE_SERVERS } from '../config.js';
 
-export function createPeerService({ elements, state, statusUI, sendService, receiveService, getSignalApi }) {
+export function createPeerService({ elements, state, statusUI, sendService, receiveService, getSignalApi, getCallApi }) {
   const {
     log,
     updateChannelStatus,
@@ -60,10 +60,21 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
         updateConnectionTypeStatus('未建立');
         updateReconnectAvailability(true);
       }
+      getCallApi().updateCallButtons();
     });
 
     pc.addEventListener('datachannel', (event) => {
       setupDataChannel(event.channel);
+    });
+
+    pc.addEventListener('track', (event) => {
+      getCallApi().handleRemoteTrack(event);
+    });
+
+    pc.addEventListener('negotiationneeded', () => {
+      if (state.hasLocalMedia || state.mediaSenders.length) {
+        getSignalApi().requestNegotiation('negotiationneeded');
+      }
     });
 
     if (isOfferer) {
@@ -87,6 +98,7 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
       elements.peerHint.textContent = '连接成功，正在识别连接方式。';
       elements.dropZone.classList.add('enabled');
       updateConnectionTypeFromStats();
+      getCallApi().updateCallButtons();
       log('文件传输通道已建立');
       sendService.processSendQueue();
     });
@@ -100,6 +112,7 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
       updateReconnectAvailability(true);
       elements.peerHint.textContent = '文件传输通道已关闭，可点击“局部重连”恢复。';
       elements.dropZone.classList.remove('enabled');
+      getCallApi().updateCallButtons();
       log('文件传输通道已关闭');
     });
 
@@ -128,6 +141,9 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
     state.channel = null;
     state.connection = null;
     state.connectionType = '';
+    state.pendingCandidates = [];
+    state.makingOffer = false;
+    state.ignoreOffer = false;
     updateChannelStatus('重新建链中');
     updateConnectionTypeStatus('重新建链中');
   }
@@ -215,15 +231,21 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
   }
 
   function closePeerConnection() {
+    getCallApi().cleanupMedia({ removeSenders: false });
     cleanupTransferRuntime();
     state.channel?.close();
     state.connection?.close();
     state.channel = null;
     state.connection = null;
     state.connectionType = '';
+    state.pendingCandidates = [];
+    state.makingOffer = false;
+    state.ignoreOffer = false;
+    state.isSettingRemoteAnswerPending = false;
     state.remotePeerId = '';
     updateConnectionTypeStatus('未建立');
     elements.dropZone.classList.remove('enabled');
+    getCallApi().updateCallButtons();
   }
 
   function reconnectSession() {
@@ -262,6 +284,10 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
     receiveService.cleanupInterruptedReceives();
   }
 
+  function getConnection() {
+    return state.connection;
+  }
+
   return {
     ensurePeerConnection,
     closePeerConnection,
@@ -271,5 +297,6 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
     isChannelReady,
     sendData,
     updateConnectionTypeFromStats,
+    getConnection,
   };
 }

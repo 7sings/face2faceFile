@@ -1,6 +1,7 @@
 import { BUFFER_HIGH_WATER } from './modules/config.js';
 import { elements } from './modules/elements.js';
 import { state } from './modules/state.js';
+import { createCallService } from './modules/features/call.js';
 import { createExportActions } from './modules/features/exports.js';
 import { createPeerService } from './modules/features/peer.js';
 import { createReceiveService } from './modules/features/receive.js';
@@ -12,6 +13,7 @@ import { createRoomCode, normalizeRoomCode } from './modules/utils/common.js';
 
 const statusUI = createStatusUI({ elements, state });
 const exportActionsRef = {};
+const callRef = {};
 const peerRef = {};
 const signalingRef = {};
 
@@ -48,6 +50,15 @@ const sendService = createSendService({
   },
 });
 
+const callService = createCallService({
+  elements,
+  state,
+  statusUI,
+  getPeerApi: () => peerRef.api,
+  getSignalApi: () => signalingRef.api,
+});
+callRef.api = callService;
+
 peerRef.api = createPeerService({
   elements,
   state,
@@ -55,6 +66,7 @@ peerRef.api = createPeerService({
   sendService,
   receiveService,
   getSignalApi: () => signalingRef.api,
+  getCallApi: () => callRef.api,
 });
 
 signalingRef.api = createSignalingService({
@@ -62,6 +74,7 @@ signalingRef.api = createSignalingService({
   state,
   statusUI,
   peerService: peerRef.api,
+  getCallApi: () => callRef.api,
 });
 
 init();
@@ -72,6 +85,7 @@ function init() {
   bindEvents();
   exportActions.updateBatchActions();
   receiveService.updateReceiveModeStatus();
+  callService.updateCallButtons();
   signalingRef.api.connectSignal();
 }
 
@@ -124,5 +138,9 @@ function bindEvents() {
   elements.downloadSelectedBtn.addEventListener('click', exportActions.downloadSelectedFilesDirectly);
   elements.saveImagesBtn.addEventListener('click', exportActions.saveSelectedImagesToAlbum);
   elements.downloadZipBtn.addEventListener('click', exportActions.downloadSelectedFilesAsZip);
+  elements.startCallBtn.addEventListener('click', callService.startCall);
+  elements.hangupCallBtn.addEventListener('click', callService.hangupCall);
+  elements.toggleMicBtn.addEventListener('click', callService.toggleMic);
+  elements.toggleCameraBtn.addEventListener('click', callService.toggleCamera);
   elements.clearLogBtn.addEventListener('click', statusUI.clearLog);
 }

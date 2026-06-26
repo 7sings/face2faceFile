@@ -14,6 +14,7 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
   const { log } = statusUI;
   const {
     appendSavedLabel,
+    appendTransferAction,
     createTransferItem,
     enableTransferSelection,
     hideTransferSelection,
@@ -232,7 +233,7 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
     action.download = safeName;
     action.className = 'download-link';
     action.textContent = '下载';
-    task.element.append(action);
+    appendTransferAction(task.element, action);
 
     state.receiveTasks.delete(fileId);
     if (isImageFile(state.completedFiles.get(fileId))) {
@@ -241,7 +242,7 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
       saveAction.className = 'album-link';
       saveAction.textContent = '保存到相册';
       saveAction.addEventListener('click', () => exportActions.saveImagesToAlbum([state.completedFiles.get(fileId)]));
-      task.element.append(saveAction);
+      appendTransferAction(task.element, saveAction);
     }
 
     exportActions.updateBatchActions();
@@ -301,7 +302,7 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
       action.download = task.name;
       action.className = 'download-link';
       action.textContent = '下载';
-      task.element.append(action);
+      appendTransferAction(task.element, action);
 
       const completedFile = state.completedFiles.get(fileId);
       if (isImageFile(completedFile)) {
@@ -310,7 +311,7 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
         saveAction.className = 'album-link';
         saveAction.textContent = '保存到相册';
         saveAction.addEventListener('click', () => exportActions.saveImagesToAlbum([completedFile]));
-        task.element.append(saveAction);
+        appendTransferAction(task.element, saveAction);
       }
 
       log(`已接收：${task.name}`);

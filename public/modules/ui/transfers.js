@@ -5,7 +5,11 @@ export function createTransferUI({ state, getExportActions }) {
     const label = document.createElement('span');
     label.className = 'saved-label';
     label.textContent = '已保存';
-    item.append(label);
+    appendTransferAction(item, label);
+  }
+
+  function appendTransferAction(item, action) {
+    item.querySelector('.transfer-actions').append(action);
   }
 
   function createTransferItem(container, file) {
@@ -25,6 +29,7 @@ export function createTransferUI({ state, getExportActions }) {
         <span></span>
         <div class="progress-track"><div class="progress-bar"></div></div>
       </div>
+      <div class="transfer-actions"></div>
     `;
     item.querySelector('strong').textContent = file.name;
     item.querySelector('span').textContent = file.meta;
@@ -78,6 +83,7 @@ export function createTransferUI({ state, getExportActions }) {
 
   return {
     appendSavedLabel,
+    appendTransferAction,
     createTransferItem,
     updateTransferItem,
     setTransferThumbnail,

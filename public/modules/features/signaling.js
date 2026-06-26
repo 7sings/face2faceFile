@@ -2,7 +2,7 @@ import { DEFAULT_ICE_SERVERS, ICE_CONFIG_CACHE_MS } from '../config.js';
 import { iceConfigCache } from '../state.js';
 import { parseJson } from '../utils/common.js';
 
-export function createSignalingService({ elements, state, statusUI, peerService }) {
+export function createSignalingService({ elements, state, statusUI, peerService, getCallApi }) {
   const {
     log,
     updateChannelStatus,
@@ -90,9 +90,17 @@ export function createSignalingService({ elements, state, statusUI, peerService 
   async function handleSignal(message) {
     if (message.type === 'pong') return;
 
+    if (message.type === 'ready') {
+      if (message.scope === 'call') {
+        getCallApi().handleCallControl(message);
+      }
+      return;
+    }
+
     if (message.type === 'welcome') {
       if (message.peers.length) {
         state.remotePeerId = message.peers[0];
+        updateNegotiationRole();
         if (peerService.hasActivePeerConnection()) {
           updatePeerStatus('已直连');
           return;
@@ -106,12 +114,14 @@ export function createSignalingService({ elements, state, statusUI, peerService 
 
     if (message.type === 'peer-joined') {
       state.remotePeerId = message.peerId;
+      updateNegotiationRole();
       if (peerService.hasActivePeerConnection()) return;
 
       updatePeerStatus('已发现');
       elements.peerHint.textContent = '对端已加入，等待对端发起直连。';
       log('对端已加入房间');
       prefetchIceServers();
+      getCallApi().updateCallButtons();
       return;
     }
 
@@ -123,41 +133,135 @@ export function createSignalingService({ elements, state, statusUI, peerService 
         updateChannelStatus('未建立');
         updateConnectionPill('等待对端', 'pending');
         peerService.closePeerConnection();
+        getCallApi().updateCallButtons();
       }
       return;
     }
 
     if (message.from && !state.remotePeerId) {
       state.remotePeerId = message.from;
+      updateNegotiationRole();
     }
 
     if (message.type === 'offer') {
-      peerService.resetStalePeerConnection();
-      const iceServers = await getIceServers();
-      const pc = peerService.ensurePeerConnection(false, iceServers);
-      await pc.setRemoteDescription(message.description);
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      sendSignal({ type: 'answer', to: message.from, description: pc.localDescription });
-      log('已响应直连请求');
+      await handleOffer(message);
       return;
     }
 
     if (message.type === 'answer') {
-      if (state.connection) {
-        await state.connection.setRemoteDescription(message.description);
-        log('对端已接受直连请求');
-      }
+      await handleAnswer(message);
       return;
     }
 
-    if (message.type === 'candidate' && message.candidate && state.connection) {
-      try {
-        await state.connection.addIceCandidate(message.candidate);
-      } catch (error) {
+    if (message.type === 'candidate' && message.candidate) {
+      await handleCandidate(message.candidate);
+    }
+  }
+
+  async function handleOffer(message) {
+    peerService.resetStalePeerConnection();
+    const iceServers = await getIceServers();
+    const pc = peerService.ensurePeerConnection(false, iceServers);
+    updateNegotiationRole();
+
+    const readyForOffer = !state.makingOffer && (pc.signalingState === 'stable' || state.isSettingRemoteAnswerPending);
+    const offerCollision = !readyForOffer;
+    state.ignoreOffer = !state.isPolite && offerCollision;
+    if (state.ignoreOffer) {
+      log('已忽略一次冲突的通话协商请求');
+      return;
+    }
+    state.ignoreOffer = false;
+
+    try {
+      if (offerCollision) {
+        await pc.setLocalDescription({ type: 'rollback' });
+      }
+      await pc.setRemoteDescription(message.description);
+      await flushPendingCandidates();
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      sendSignal({ type: 'answer', to: message.from, description: pc.localDescription });
+      log('已响应直连请求');
+    } catch (error) {
+      log(`处理协商请求失败：${error.message}`);
+    } finally {
+      state.ignoreOffer = false;
+    }
+  }
+
+  async function handleAnswer(message) {
+    if (!state.connection) return;
+
+    try {
+      state.isSettingRemoteAnswerPending = true;
+      await state.connection.setRemoteDescription(message.description);
+      state.ignoreOffer = false;
+      await flushPendingCandidates();
+      log('对端已接受直连请求');
+    } catch (error) {
+      log(`处理协商响应失败：${error.message}`);
+    } finally {
+      state.isSettingRemoteAnswerPending = false;
+    }
+  }
+
+  async function handleCandidate(candidate) {
+    if (state.ignoreOffer) return;
+
+    if (!state.connection) {
+      state.pendingCandidates.push(candidate);
+      return;
+    }
+
+    if (!state.connection.remoteDescription) {
+      state.pendingCandidates.push(candidate);
+      return;
+    }
+
+    try {
+      await state.connection.addIceCandidate(candidate);
+    } catch (error) {
+      if (!state.ignoreOffer) {
         log(`添加网络候选失败：${error.message}`);
       }
     }
+  }
+
+  async function flushPendingCandidates() {
+    if (!state.connection?.remoteDescription) return;
+    const candidates = state.pendingCandidates.splice(0);
+    for (const candidate of candidates) {
+      try {
+        await state.connection.addIceCandidate(candidate);
+      } catch (error) {
+        if (!state.ignoreOffer) {
+          log(`添加缓存网络候选失败：${error.message}`);
+        }
+      }
+    }
+  }
+
+  async function requestNegotiation(reason = 'manual') {
+    const pc = state.connection;
+    if (!pc || pc.signalingState === 'closed' || !state.remotePeerId) return;
+    if (state.makingOffer) return;
+
+    try {
+      state.makingOffer = true;
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      sendSignal({ type: 'offer', to: state.remotePeerId, description: pc.localDescription, reason });
+    } catch (error) {
+      log(`发起协商失败：${error.message}`);
+    } finally {
+      state.makingOffer = false;
+    }
+  }
+
+  function updateNegotiationRole() {
+    if (!state.remotePeerId) return;
+    state.isPolite = state.peerId > state.remotePeerId;
   }
 
   function prefetchIceServers() {
@@ -234,10 +338,8 @@ export function createSignalingService({ elements, state, statusUI, peerService 
   async function startAsOfferer() {
     peerService.resetStalePeerConnection();
     const iceServers = await getIceServers();
-    const pc = peerService.ensurePeerConnection(true, iceServers);
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    sendSignal({ type: 'offer', to: state.remotePeerId, description: pc.localDescription });
+    peerService.ensurePeerConnection(true, iceServers);
+    await requestNegotiation('initial');
     log('已发起直连请求');
   }
 
@@ -266,5 +368,6 @@ export function createSignalingService({ elements, state, statusUI, peerService 
     clearSignalHeartbeat,
     getIceServers,
     prefetchIceServers,
+    requestNegotiation,
   };
 }

@@ -49,6 +49,40 @@
         </div>
       </section>
 
+      <section class="card call-card">
+        <div class="section-title">
+          <div>
+            <h2>2. 音视频通话</h2>
+            <p>连接成功后可直接与对端进行浏览器音视频通话。</p>
+          </div>
+        </div>
+
+        <div class="call-status-panel">
+          <strong id="callStatus">未开始通话</strong>
+          <p id="callHint">请先等待 P2P 连接成功，再开启通话。</p>
+        </div>
+
+        <div class="video-grid">
+          <div class="video-tile remote">
+            <video id="remoteVideo" autoplay playsinline></video>
+            <div id="remoteVideoPlaceholder" class="video-placeholder">等待对端视频</div>
+            <span>对端</span>
+          </div>
+          <div class="video-tile local">
+            <video id="localVideo" autoplay playsinline muted></video>
+            <div id="localVideoPlaceholder" class="video-placeholder">本地预览</div>
+            <span>本地</span>
+          </div>
+        </div>
+
+        <div class="call-controls">
+          <button id="startCallBtn" type="button" disabled>开始通话</button>
+          <button id="toggleMicBtn" type="button" class="ghost-btn" disabled>静音</button>
+          <button id="toggleCameraBtn" type="button" class="ghost-btn" disabled>关闭摄像头</button>
+          <button id="hangupCallBtn" type="button" class="danger-btn" disabled>挂断</button>
+        </div>
+      </section>
+
       <section class="card transfer-card">
         <div class="section-title">
           <div>

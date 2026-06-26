@@ -224,6 +224,14 @@ h3 {
   color: white;
 }
 
+.danger-btn {
+  background: var(--red);
+}
+
+.danger-btn:hover {
+  background: #b91c1c;
+}
+
 .tips {
   margin-top: 12px;
   font-size: 13px;
@@ -268,6 +276,89 @@ h3 {
   padding: 9px 12px;
   border-radius: 12px;
   font-size: 13px;
+}
+
+.call-status-panel {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 16px;
+  border: 1px dashed rgba(37, 99, 235, 0.28);
+  border-radius: 20px;
+  padding: 16px;
+  background: rgba(239, 246, 255, 0.64);
+}
+
+.call-status-panel strong {
+  font-size: 18px;
+}
+
+.call-status-panel p {
+  color: var(--muted);
+}
+
+.video-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(220px, 0.8fr);
+  gap: 14px;
+}
+
+.video-tile {
+  position: relative;
+  overflow: hidden;
+  min-height: 220px;
+  border-radius: 22px;
+  background: #0f172a;
+}
+
+.video-tile video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 220px;
+  object-fit: cover;
+  background: #0f172a;
+}
+
+.video-tile.local video {
+  transform: scaleX(-1);
+}
+
+.video-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  color: #cbd5e1;
+  background: #0f172a;
+  text-align: center;
+}
+
+.video-tile.has-video .video-placeholder {
+  display: none;
+}
+
+.video-tile > span {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: white;
+  background: rgba(15, 23, 42, 0.72);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.call-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.call-controls button {
+  flex: 1 1 140px;
 }
 
 .drop-zone {
@@ -430,6 +521,7 @@ h3 {
 
 .transfer-info {
   min-width: 0;
+  overflow: hidden;
 }
 
 .transfer-info strong {
@@ -441,10 +533,13 @@ h3 {
 
 .transfer-info span {
   display: block;
+  overflow: hidden;
   margin-top: 4px;
   font-size: 13px;
   line-height: 1.4;
-  word-break: break-word;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  word-break: normal;
 }
 
 .progress-track {
@@ -464,6 +559,18 @@ h3 {
   transition: width 0.12s linear;
 }
 
+.transfer-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.transfer-actions:empty {
+  display: none;
+}
+
 .download-link,
 .album-link {
   align-self: center;
@@ -472,6 +579,7 @@ h3 {
   color: white;
   background: var(--green);
   text-decoration: none;
+  white-space: nowrap;
 }
 
 .album-link {
@@ -485,6 +593,7 @@ h3 {
   color: #166534;
   background: #dcfce7;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .log-list {
@@ -548,11 +657,37 @@ h3 {
   }
 
   .room-grid,
-  .status-grid {
+  .status-grid,
+  .video-grid {
     grid-template-columns: 1fr;
+  }
+
+  .video-tile,
+  .video-tile video {
+    min-height: 210px;
   }
 
   .room-code-box strong {
     font-size: 34px;
   }
+
+  .transfer-item {
+    grid-template-columns: 56px minmax(0, 1fr);
+    align-items: center;
+  }
+
+  .transfer-item.is-selectable {
+    grid-template-columns: auto 56px minmax(0, 1fr);
+  }
+
+  .transfer-actions {
+    grid-column: 2 / -1;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .transfer-item.is-selectable .transfer-actions {
+    grid-column: 3 / -1;
+  }
 }
+
