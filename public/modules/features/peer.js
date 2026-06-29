@@ -4,6 +4,7 @@ import { describeCandidate, describeCandidatePair, describeIceUrl, isIPv4Candida
 export function createPeerService({ elements, state, statusUI, sendService, receiveService, getSignalApi, getCallApi }) {
   const {
     log,
+    notify,
     updateChannelStatus,
     updateConnectionPill,
     updateConnectionTypeStatus,
@@ -138,11 +139,12 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
       updateConnectionTypeFromStats();
       getCallApi().updateCallButtons();
       log('文件传输通道已建立');
+      sendService.resumeInterruptedSends();
       sendService.processSendQueue();
     });
 
     channel.addEventListener('close', () => {
-      cleanupTransferRuntime();
+      cleanupTransferRuntime({ preserveTransfers: true });
       state.connectionType = '';
       updateChannelStatus('已关闭');
       updateConnectionTypeStatus('未建立');
@@ -151,6 +153,7 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
       elements.peerHint.textContent = '文件传输通道已关闭，可点击“局部重连”恢复。';
       elements.dropZone.classList.remove('enabled');
       getCallApi().updateCallButtons();
+      notify('面对面快传', '文件传输通道已关闭，回到页面后可局部重连续传。');
       log('文件传输通道已关闭');
     });
 
@@ -345,9 +348,9 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
     }
   }
 
-  function closePeerConnection() {
+  function closePeerConnection({ preserveTransfers = false } = {}) {
     getCallApi().cleanupMedia({ removeSenders: false });
-    cleanupTransferRuntime();
+    cleanupTransferRuntime({ preserveTransfers });
     state.channel?.close();
     state.connection?.close();
     state.channel = null;
@@ -377,7 +380,7 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
     state.connectionType = '';
     updateConnectionTypeStatus('重建中');
     updateConnectionPill('正在重连', 'pending');
-    elements.peerHint.textContent = '正在局部重连，已完成文件和日志会保留。';
+    elements.peerHint.textContent = '正在局部重连，已完成文件和未完成传输进度会保留。';
     log('开始局部重连');
 
     teardownConnectionForReconnect();
@@ -395,12 +398,12 @@ export function createPeerService({ elements, state, statusUI, sendService, rece
       socket.close();
     }
 
-    closePeerConnection();
+    closePeerConnection({ preserveTransfers: true });
   }
 
-  function cleanupTransferRuntime() {
-    sendService.cleanupInterruptedSends();
-    receiveService.cleanupInterruptedReceives();
+  function cleanupTransferRuntime({ preserveTransfers = true } = {}) {
+    sendService.cleanupInterruptedSends({ preserveTransfers });
+    receiveService.cleanupInterruptedReceives({ preserveTransfers });
   }
 
   function getConnection() {

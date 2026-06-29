@@ -1,6 +1,6 @@
-import { getFileBadge } from '../utils/common.js';
+import { formatBytes, getFileBadge } from '../utils/common.js';
 
-export function createTransferUI({ state, getExportActions }) {
+export function createTransferUI({ elements, state, getExportActions }) {
   function appendSavedLabel(item) {
     const label = document.createElement('span');
     label.className = 'saved-label';
@@ -81,6 +81,44 @@ export function createTransferUI({ state, getExportActions }) {
     item.classList.remove('is-selectable');
   }
 
+  function updateOverallProgress() {
+    updateSendOverallProgress();
+    updateReceiveOverallProgress();
+  }
+
+  function updateSendOverallProgress() {
+    const tasks = [...state.sendTasks.values()];
+    const total = tasks.reduce((sum, task) => sum + getTaskSize(task), 0);
+    const transferred = tasks.reduce((sum, task) => sum + (task.done ? getTaskSize(task) : Math.min(getTaskSize(task), Number(task.offset) || 0)), 0);
+    updateProgressSummary(elements.sendOverallBar, elements.sendOverallMeta, transferred, total, '暂无发送任务');
+  }
+
+  function updateReceiveOverallProgress() {
+    const receiveTasks = [...state.receiveTasks.values()];
+    const completedFiles = [...state.completedFiles.values()];
+    const pendingTotal = receiveTasks.reduce((sum, task) => sum + getTaskSize(task), 0);
+    const pendingReceived = receiveTasks.reduce((sum, task) => sum + Math.min(getTaskSize(task), Number(task.received) || 0), 0);
+    const completedTotal = completedFiles.reduce((sum, file) => sum + getCompletedFileSize(file), 0);
+    updateProgressSummary(elements.receiveOverallBar, elements.receiveOverallMeta, pendingReceived + completedTotal, pendingTotal + completedTotal, '暂无接收任务');
+  }
+
+  function updateProgressSummary(bar, meta, transferred, total, emptyText) {
+    if (!bar || !meta) return;
+    const progress = total > 0 ? Math.max(0, Math.min(1, transferred / total)) : 0;
+    bar.style.width = `${progress * 100}%`;
+    meta.textContent = total > 0
+      ? `${formatBytes(transferred)} / ${formatBytes(total)} · ${Math.round(progress * 100)}%`
+      : emptyText;
+  }
+
+  function getTaskSize(task) {
+    return Math.max(0, Number(task?.size) || 0);
+  }
+
+  function getCompletedFileSize(file) {
+    return Math.max(0, Number(file?.size) || Number(file?.blob?.size) || 0);
+  }
+
   return {
     appendSavedLabel,
     appendTransferAction,
@@ -89,5 +127,6 @@ export function createTransferUI({ state, getExportActions }) {
     setTransferThumbnail,
     enableTransferSelection,
     hideTransferSelection,
+    updateOverallProgress,
   };
 }

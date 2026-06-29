@@ -131,6 +131,13 @@
 
         <div class="queue-block">
           <h3>发送进度</h3>
+          <div class="overall-progress">
+            <div class="overall-progress-header">
+              <strong>发送总进度</strong>
+              <span id="sendOverallMeta">暂无发送任务</span>
+            </div>
+            <div class="progress-track"><div id="sendOverallBar" class="progress-bar"></div></div>
+          </div>
           <div id="sendList" class="empty-list">暂无发送任务</div>
         </div>
 
@@ -152,6 +159,13 @@
                 <button id="downloadZipBtn" type="button" disabled>下载 ZIP</button>
               </div>
             </div>
+          </div>
+          <div class="overall-progress">
+            <div class="overall-progress-header">
+              <strong>接收总进度</strong>
+              <span id="receiveOverallMeta">暂无接收任务</span>
+            </div>
+            <div class="progress-track"><div id="receiveOverallBar" class="progress-bar"></div></div>
           </div>
           <div id="receiveList" class="empty-list">暂无接收文件</div>
         </div>

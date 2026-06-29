@@ -49,4 +49,10 @@ export const state = {
   manualReconnectInProgress: false,
   suppressSocketCloseReconnect: false,
   isSending: false,
+  wakeLockSentinel: null,
+  wakeLockRequestInFlight: null,
+  wakeLockUnsupportedLogged: false,
+  wakeLockErrorLogged: false,
+  notificationsEnabled: false,
+  isPageHidden: false,
 };

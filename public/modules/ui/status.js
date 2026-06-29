@@ -51,6 +51,32 @@ export function createStatusUI({ elements, state }) {
     elements.logList.innerHTML = '';
   }
 
+  async function requestNotificationPermission() {
+    if (!('Notification' in window)) return false;
+    if (Notification.permission === 'granted') {
+      state.notificationsEnabled = true;
+      return true;
+    }
+    if (Notification.permission !== 'default') return false;
+
+    try {
+      const permission = await Notification.requestPermission();
+      state.notificationsEnabled = permission === 'granted';
+      return state.notificationsEnabled;
+    } catch {
+      return false;
+    }
+  }
+
+  function notify(title, body) {
+    if (!state.notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
+    if (document.visibilityState === 'visible') return;
+
+    try {
+      new Notification(title, { body, tag: 'face2face-file-transfer' });
+    } catch {}
+  }
+
   function log(text) {
     const line = document.createElement('div');
     line.className = 'log-line';
@@ -69,6 +95,8 @@ export function createStatusUI({ elements, state }) {
     updateReconnectAvailability,
     copyShareLink,
     clearLog,
+    requestNotificationPermission,
+    notify,
     log,
   };
 }

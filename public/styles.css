@@ -405,6 +405,27 @@ h3 {
   margin-top: 22px;
 }
 
+.overall-progress {
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.overall-progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.overall-progress-header span {
+  color: var(--muted);
+  font-size: 13px;
+  text-align: right;
+}
+
 .queue-header {
   display: flex;
   align-items: center;

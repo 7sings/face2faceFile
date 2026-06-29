@@ -10,8 +10,8 @@ import {
   updateTransferStats,
 } from '../utils/common.js';
 
-export function createReceiveService({ elements, state, statusUI, transferUI, exportActions }) {
-  const { log } = statusUI;
+export function createReceiveService({ elements, state, statusUI, transferUI, exportActions, channelApi, getSendApi, onTransferActivity = () => {} }) {
+  const { log, notify } = statusUI;
   const {
     appendSavedLabel,
     appendTransferAction,
@@ -19,6 +19,7 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
     enableTransferSelection,
     hideTransferSelection,
     setTransferThumbnail,
+    updateOverallProgress,
     updateTransferItem,
   } = transferUI;
 
@@ -51,6 +52,16 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
       return;
     }
 
+    if (message.type === 'file-resume-offer') {
+      await handleResumeOffer(message);
+      return;
+    }
+
+    if (message.type === 'file-resume-ack') {
+      getSendApi()?.handleResumeAck(message);
+      return;
+    }
+
     if (message.type === 'file-chunk') {
       if (!message.id) {
         log('收到缺少文件 ID 的分片描述，已忽略');
@@ -71,7 +82,18 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
 
   async function createReceiveTask(message) {
     const fileId = message.id;
-    if (!fileId) return;
+    if (!fileId) return null;
+
+    const existingTask = state.receiveTasks.get(fileId);
+    if (existingTask) {
+      log(`收到重复文件信息，继续使用已有接收任务：${existingTask.name}`);
+      return existingTask;
+    }
+
+    if (state.completedFiles.has(fileId)) {
+      log('收到已完成文件的重复信息，已忽略');
+      return null;
+    }
 
     const element = createTransferItem(elements.receiveList, {
       id: fileId,
@@ -84,6 +106,7 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
 
     const task = {
       id: fileId,
+      originalName: message.name || '未命名文件',
       name: message.name || '未命名文件',
       size: Number(message.size) || 0,
       mime: message.mime || 'application/octet-stream',
@@ -94,13 +117,56 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
       writeChain: Promise.resolve(),
       received: 0,
       seqExpected: 0,
+      interrupted: false,
       transferStats: createTransferStats(),
       element,
     };
 
     state.receiveTasks.set(fileId, task);
     await setupReceiveSink(task);
+    notifyTransferActivity();
     log(`开始接收：${task.name}`);
+    return task;
+  }
+
+  async function handleResumeOffer(message) {
+    const fileId = message.id;
+    if (!fileId || !channelApi?.isChannelReady()) return;
+
+    const completedFile = state.completedFiles.get(fileId);
+    if (completedFile) {
+      channelApi.sendData({
+        type: 'file-resume-ack',
+        id: fileId,
+        offset: getCompletedFileSize(completedFile),
+        seq: 0,
+      });
+      return;
+    }
+
+    let task = state.receiveTasks.get(fileId);
+    if (task && !isCompatibleReceiveTask(task, message)) {
+      log(`续传失败：${task.name} 的文件信息与发送端不一致`);
+      return;
+    }
+
+    if (!task) {
+      task = await createReceiveTask(message);
+    }
+    if (!task) return;
+
+    task.interrupted = false;
+    updateTransferItem(task.element, task.size ? task.received / task.size : 0, `${formatBytes(task.received)} / ${formatBytes(task.size)} · 继续接收中`);
+    channelApi.sendData({ type: 'file-resume-ack', id: fileId, offset: task.received, seq: task.seqExpected });
+    notifyTransferActivity();
+    notify('面对面快传', `已准备续传：${task.name}`);
+    log(`已响应续传：${task.name}，当前已接收 ${formatBytes(task.received)}`);
+  }
+
+  function isCompatibleReceiveTask(task, message) {
+    const size = Number(message.size) || 0;
+    const mime = message.mime || 'application/octet-stream';
+    return task.size === size && task.mime === mime;
   }
 
   async function setupReceiveSink(task) {
@@ -193,8 +259,10 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
     }
 
     task.received += buffer.byteLength;
+    task.interrupted = false;
     updateTransferStats(task, task.received);
     updateTransferItem(task.element, task.size ? task.received / task.size : 0, buildTransferMeta(task, task.received, task.size));
+    notifyTransferActivity();
   }
 
   async function finishReceive(fileId) {
@@ -219,6 +287,7 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
       id: fileId,
       name: safeName,
       mime: task.mime,
+      size: blob.size,
       blob,
       url,
       storage: 'blob',
@@ -236,6 +305,7 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
     appendTransferAction(task.element, action);
 
     state.receiveTasks.delete(fileId);
+    notifyTransferActivity();
     if (isImageFile(state.completedFiles.get(fileId))) {
       const saveAction = document.createElement('button');
       saveAction.type = 'button';
@@ -271,6 +341,7 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
       log(`保存失败：${task.name}，${error.message}`);
     } finally {
       state.receiveTasks.delete(fileId);
+      notifyTransferActivity();
       exportActions.updateBatchActions();
     }
   }
@@ -323,6 +394,7 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
       log(`浏览器本地暂存失败：${task.name}，${error.message}`);
     } finally {
       state.receiveTasks.delete(fileId);
+      notifyTransferActivity();
       exportActions.updateBatchActions();
     }
   }
@@ -381,9 +453,32 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
     elements.selectReceiveDirBtn.textContent = '当前浏览器不支持选择目录';
   }
 
-  function cleanupInterruptedReceives() {
+  function getCompletedFileSize(file) {
+    return Math.max(0, Number(file?.size) || Number(file?.blob?.size) || 0);
+  }
+
+  function notifyTransferActivity() {
+    updateOverallProgress();
+    onTransferActivity();
+  }
+
+  function cleanupInterruptedReceives({ preserveTransfers = true } = {}) {
     state.pendingChunkHeaders = [];
     state.dataMessageChain = Promise.resolve();
+
+    if (preserveTransfers) {
+      let interruptedCount = 0;
+      for (const task of state.receiveTasks.values()) {
+        task.interrupted = true;
+        interruptedCount += 1;
+        updateTransferItem(task.element, task.size ? task.received / task.size : 0, `${formatBytes(task.received)} / ${formatBytes(task.size)} · 等待重连续传`);
+      }
+      if (interruptedCount) {
+        notify('面对面快传', '接收已中断，回到页面后可点击局部重连续传。');
+      }
+      notifyTransferActivity();
+      return;
+    }
 
     for (const task of state.receiveTasks.values()) {
       if (task.writer) {
@@ -395,6 +490,7 @@ export function createReceiveService({ elements, state, statusUI, transferUI, ex
       updateTransferItem(task.element, task.size ? task.received / task.size : 0, `${formatBytes(task.received)} · 接收中断`);
     }
     state.receiveTasks.clear();
+    notifyTransferActivity();
   }
 
   return {

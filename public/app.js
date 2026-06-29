@@ -15,9 +15,11 @@ const statusUI = createStatusUI({ elements, state });
 const exportActionsRef = {};
 const callRef = {};
 const peerRef = {};
+const sendRef = {};
 const signalingRef = {};
 
 const transferUI = createTransferUI({
+  elements,
   state,
   getExportActions: () => exportActionsRef.api,
 });
@@ -35,6 +37,12 @@ const receiveService = createReceiveService({
   statusUI,
   transferUI,
   exportActions,
+  channelApi: {
+    isChannelReady: () => peerRef.api?.isChannelReady(),
+    sendData: (data) => peerRef.api?.sendData(data),
+  },
+  getSendApi: () => sendRef.api,
+  onTransferActivity: handleTransferActivity,
 });
 
 const sendService = createSendService({
@@ -48,7 +56,9 @@ const sendService = createSendService({
     getChannel: () => state.channel,
     bufferHighWater: BUFFER_HIGH_WATER,
   },
+  onTransferActivity: handleTransferActivity,
 });
+sendRef.api = sendService;
 
 const callService = createCallService({
   elements,
@@ -85,13 +95,18 @@ function init() {
   bindEvents();
   exportActions.updateBatchActions();
   receiveService.updateReceiveModeStatus();
+  transferUI.updateOverallProgress();
+  bindPageLifecycle();
   callService.updateCallButtons();
   signalingRef.api.connectSignal();
 }
 
 function bindEvents() {
   elements.copyLinkBtn.addEventListener('click', statusUI.copyShareLink);
-  elements.reconnectBtn.addEventListener('click', peerRef.api.reconnectSession);
+  elements.reconnectBtn.addEventListener('click', () => {
+    void statusUI.requestNotificationPermission();
+    peerRef.api.reconnectSession();
+  });
   elements.resetRoomBtn.addEventListener('click', () => {
     window.location.href = `${window.location.pathname}?room=${createRoomCode()}`;
   });
@@ -107,6 +122,7 @@ function bindEvents() {
   });
 
   elements.fileInput.addEventListener('change', () => {
+    void statusUI.requestNotificationPermission();
     sendService.sendFiles([...elements.fileInput.files]);
     elements.fileInput.value = '';
   });
@@ -126,6 +142,7 @@ function bindEvents() {
   });
 
   elements.dropZone.addEventListener('drop', (event) => {
+    void statusUI.requestNotificationPermission();
     sendService.sendFiles([...event.dataTransfer.files]);
   });
 
@@ -143,4 +160,82 @@ function bindEvents() {
   elements.toggleMicBtn.addEventListener('click', callService.toggleMic);
   elements.toggleCameraBtn.addEventListener('click', callService.toggleCamera);
   elements.clearLogBtn.addEventListener('click', statusUI.clearLog);
+}
+
+function bindPageLifecycle() {
+  state.isPageHidden = document.visibilityState === 'hidden';
+  document.addEventListener('visibilitychange', () => {
+    state.isPageHidden = document.visibilityState === 'hidden';
+    if (state.isPageHidden) {
+      if (hasUnfinishedTransfers()) {
+        elements.peerHint.textContent = '页面已进入后台，系统可能暂停传输；请尽量保持前台和屏幕点亮。';
+        statusUI.log('页面已进入后台，移动端浏览器可能暂停传输');
+      }
+      return;
+    }
+
+    if (hasUnfinishedTransfers()) {
+      elements.peerHint.textContent = '页面已回到前台，正在尝试保持屏幕常亮并继续传输。';
+      void syncWakeLock();
+    }
+  });
+}
+
+function handleTransferActivity() {
+  void syncWakeLock();
+}
+
+function hasUnfinishedTransfers() {
+  for (const task of state.sendTasks.values()) {
+    if (!task.done) return true;
+  }
+  return state.receiveTasks.size > 0;
+}
+
+async function syncWakeLock() {
+  if (!hasUnfinishedTransfers()) {
+    await releaseWakeLock();
+    return;
+  }
+
+  if (document.visibilityState !== 'visible') return;
+  if (!('wakeLock' in navigator)) {
+    if (!state.wakeLockUnsupportedLogged) {
+      state.wakeLockUnsupportedLogged = true;
+      statusUI.log('当前浏览器不支持屏幕常亮，请手动保持屏幕点亮');
+    }
+    return;
+  }
+  if (state.wakeLockSentinel || state.wakeLockRequestInFlight) return;
+
+  try {
+    state.wakeLockRequestInFlight = navigator.wakeLock.request('screen');
+    state.wakeLockSentinel = await state.wakeLockRequestInFlight;
+    state.wakeLockErrorLogged = false;
+    state.wakeLockSentinel.addEventListener('release', handleWakeLockRelease);
+    statusUI.log('已启用屏幕常亮，传输期间请保持页面前台');
+  } catch (error) {
+    if (!state.wakeLockErrorLogged) {
+      state.wakeLockErrorLogged = true;
+      statusUI.log(`屏幕常亮启用失败：${error.message}`);
+    }
+  } finally {
+    state.wakeLockRequestInFlight = null;
+  }
+}
+
+async function releaseWakeLock() {
+  if (!state.wakeLockSentinel) return;
+  const sentinel = state.wakeLockSentinel;
+  state.wakeLockSentinel = null;
+  try {
+    await sentinel.release();
+  } catch {}
+}
+
+function handleWakeLockRelease() {
+  state.wakeLockSentinel = null;
+  if (hasUnfinishedTransfers() && document.visibilityState === 'visible') {
+    statusUI.log('屏幕常亮已失效，页面回到前台时会重新尝试启用');
+  }
 }
